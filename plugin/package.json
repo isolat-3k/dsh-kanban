@@ -1,0 +1,17 @@
+{
+  "name": "dsh-kanban",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./host.js",
+  "exports": {
+    ".": "./host.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  }
+}
