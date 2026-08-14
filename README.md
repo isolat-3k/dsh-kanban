@@ -3,7 +3,7 @@
 为 DeepSeek Harness（DSH）实现的 Hermes 风格看板插件：9 列任务流转 + 拖拽 + 评论 + 事件时间线 + 多看板 + **定时列自动流转**，并支持把「就绪」任务**派发给 DSH 子代理真实执行**（Ready → Running → Done 自动流转、**心跳监控**与**实时进度**回显、结果摘要回写）。
 
 > 原型：Hermes 桌面端看板插件（`apps/desktop/src/plugins/kanban/`，功能分析见同目录《看板插件功能报告.md》）。
-> 实现形式：**静态插件包 `dsh-kanban` + 用户预设「看板」**。插件以 ES 模块包（`plugin/`，Host 半 + dsh.client 客户端 bundle）落地，由用户预设 `~/.dsh/.agent-presets/kanban/agent.cordis.yml`（standard 组合 + `dsh-kanban` 一行）挂载；选择该预设的会话自动获得看板工具与「看板」标签页。**看板数据永久落盘于 `kanban-store.json`。**
+> 实现形式：**静态插件包 `dsh-kanban`，宿主平面挂载（不经任何 Agent 预设）**。插件以 ES 模块包（`plugin/`，Host 半 + dsh.client 客户端 bundle）落地，由 web profile 的补丁层 `~/.dsh/profiles/web/cordis.patch.yml`（`insert` 一行）挂载进宿主组合；进程启动即生效，任意预设的会话都自动获得看板工具与「看板」标签页。**看板数据永久落盘于 `kanban-store.json`。**
 
 ## 文件布局
 
@@ -22,13 +22,7 @@ DSH-kanban/
 
 ## 安装（一次性）
 
-1. 预设目录（`agent.cordis.yml` = standard 组合 + 看板行，`preset.yml` 为显示名）：
-
-   ```
-   C:\Users\<用户>\.dsh\.agent-presets\kanban\
-   ```
-
-2. 包解析 junction（把 `dsh-kanban` 暴露给 profile 引导的 node_modules 解析）：
+1. 包解析 junction（把 `dsh-kanban` 暴露给 profile 引导的 node_modules 解析）：
 
    ```powershell
    New-Item -ItemType Junction `
@@ -36,18 +30,26 @@ DSH-kanban/
      -Target D:\WorkSpace\DSH-kanban\plugin
    ```
 
-3. 在 GUI 的预设选择器里选「看板」，新建会话即自动获得插件（看板标签页 + `kanban_create_task` / `kanban_dispatch_task` 工具）。
+2. 补丁层（在 web profile 的宿主组合里插入挂载行），编辑 `C:\Users\<用户>\.dsh\profiles\web\cordis.patch.yml`：
+
+   ```yaml
+   - insert:
+       - id: kanban
+         name: dsh-kanban
+   ```
+
+3. 重启 `npx @deepseek-ai/dsh web` 并刷新页面。所有会话——无论选择哪个预设——都自动获得插件（看板标签页 + `kanban_create_task` / `kanban_dispatch_task` 工具）。需要对所有 profile 生效时，把同一段补丁放进家级补丁层 `<DSH_HOME>\cordis.patch.yml`。
 
 ## 更新流程
 
-- **改 Host（`plugin/host.js`）**：重启 `npx @deepseek-ai/dsh web` 后生效（预设行随进程启动重新加载）。
+- **改 Host（`plugin/host.js`）**：重启 `npx @deepseek-ai/dsh web` 后生效（补丁层随进程启动重新加载）。
 - **改 Client（`plugin/client.js`）**：保存后刷新页面即可（bundle 由 `/plugins/dsh-kanban/client.js` 按请求从磁盘读取，no-cache）。
 - 数据文件 `kanban-store.json` 与上述更新无关，始终保留。
 
 ## 停止 / 移除
 
-- 停用：会话改用其他预设（看板行不再挂载；数据文件保留）。
-- 移除：删除预设目录 `C:\Users\<用户>\.dsh\.agent-presets\kanban\` 与 junction `C:\Users\<用户>\.dsh\profiles\node_modules\dsh-kanban`，并删除 `DSH-kanban/` 目录（数据随 `kanban-store.json` 一起删除）。
+- 停用：在补丁层给 kanban 行加 `disabled: true`（或删除 insert 行）后重启；数据文件保留。
+- 移除：删除 junction `C:\Users\<用户>\.dsh\profiles\node_modules\dsh-kanban`，并删除 `DSH-kanban/` 目录（数据随 `kanban-store.json` 一起删除）。
 
 ## 功能清单
 
@@ -134,7 +136,7 @@ DSH-kanban/
 
 ## 限制与已知行为
 
-- **刷新页面（F5）不会丢失看板入口**：客户端 bundle 属于 Web 引导图的一部分，每次刷新都重新加载；Host 端挂在预设的常驻挂载上，与页面无关。页面长时间不刷新时数据由 5s 轮询自动更新。
+- **刷新页面（F5）不会丢失看板入口**：客户端 bundle 属于 Web 引导图的一部分，每次刷新都重新加载；Host 端挂在宿主组合的常驻行上，与页面无关。页面长时间不刷新时数据由 5s 轮询自动更新。
 - 派发需要当前 DSH 进程中有**存活的代理会话**（当前对话开着即可）；否则任务留在就绪列并提示
 - 插件停止/更新/DSH 重启时，处于「运行中」的任务会被标记为「阻塞」（原因：worker lost / 插件已停止），需手动移回就绪重新派发——与 Hermes 的 stale 心跳处理同思路，不产生"假运行"卡片
 - `running` 列只能通过派发进入，不能手动拖入（防止伪造运行状态）
@@ -165,4 +167,6 @@ DSH-kanban/
 - 2026-08-14：pkg-23——**刷新按钮改为强制重读磁盘**：新增 `reload` RPC（丢弃内存缓存重读 kanban-store.json），↻ 按钮走它（5s 轮询仍用缓存）；修复连带问题：重读磁盘时不再把有活跃运行的任务误判为 worker lost（仅无 `runs` 记录的 running 任务才修复）、事件循环改用加载快照扫描。
 - 2026-08-14：pkg-24——**列「＋」按钮联动初始列**：从某列的 ＋ 打开新建任务对话框时，初始列默认即为该列（定时列入口同时预填 +1 小时定时时间）；工具栏「＋ 新任务」仍默认待细化。
 - 2026-08-14：pkg-25——**Agent 创建任务渠道 + 正式心跳超时**：Host 注册模型工具 `kanban_create_task`（主 Agent 对话内直接建卡，参数：title 必填、body/board/status/priority/assignee/scheduled_at 可选；省略 board 用第一个看板，status 默认 todo，支持定时 ISO 时间）；`createTask` 逻辑抽取为 `createTaskOp` 供 RPC 与工具共用；心跳超时由验证值 5 秒改回正式值 30 分钟。
+- 2026-08-14：**挂载方式迁移：告别预设**——看板不再经用户预设「看板」挂载（该预设目录 `~/.dsh/.agent-presets/kanban/` 已删除），改为 web profile 补丁层 `~/.dsh/profiles/web/cordis.patch.yml` 的 `insert` 行挂载到宿主平面：进程启动即生效，任意预设的会话都获得看板 RPC、两个 Agent 工具与「看板」标签页，与预设选择、会话创建顺序无关。插件代码零改动（其 Host 半本就通过 `ctx.get` 消费宿主平面服务，并把工具全局注册进宿主 tools 注册表）。删除前扫描了全部会话日志，无一会话记录 `kanban` 预设，删除不影响任何会话恢复。
 - 2026-08-14：**静态化迁移（告别动态插件）**——插件改为静态包 `dsh-kanban`（`plugin/`：ES 模块 Host + `dsh.client` 浏览器 bundle + `package.json` + `index.js` 根再导出），由用户预设「看板」（`~/.dsh/.agent-presets/kanban/`，standard 组合 + `dsh-kanban` 行）挂载，经 `~/.dsh/profiles/node_modules/dsh-kanban` 目录联接解析；RPC 由动态插件的 `harness.handle/host.call` 改为 webServer 路由 `POST /kanban/rpc`（fetch），工具注册由 `harness.registerTool` 改为 `ctx.get('tools').register`，客户端样式注入改为自建 `<style data-plugin-css>`；新增 `kanban_dispatch_task` 工具（派发「就绪」任务）。已通过 `standingKeyFor` 挂载验证（validate=OK）与 Web 引导图确认（`/plugins/dsh-kanban/client.js`、`POST /kanban/rpc` 均 200）。更新流程：改 Host 重启 DSH，改 Client 刷新页面。
+- 2026-08-14：**修复看板页永远「加载中」**——根因：插件 `inject` 只声明了 `fs/timer`，fiber 在启动早期即加载，此时 webServer 提供方 fiber 尚未激活，`ctx.get('webServer')`（strict 模式要求提供方 `fiber.state===2`）返回 `undefined`，路由注册被 `if (web && ...)` 静默跳过且不再重试；而 tools 服务加载早，工具分支正常注册（症状：Agent 工具可用、`POST /kanban/rpc` 405、页面无限加载）。修复：`inject` 补全 `webServer/tools/subagents/agents/sandboxPolicy`，Cordis 会等服务就绪再 apply（并在服务后到齐时自动重载）；同时客户端在初始加载失败时显示真实错误与「重试」按钮，不再永远显示「加载中…」。生效方式：改 Host 需重启 DSH（本次修复核心在 Host），改 Client 刷新页面即可。

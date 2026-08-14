@@ -632,6 +632,12 @@ window.__ModuleLoader__.load({
         }
 
         if (!store) {
+          if (error) {
+            return h('div', { className: 'kbn-empty' },
+              h('div', { className: 'kbn-error' }, '看板数据加载失败：' + error + '（若持续出现，请重启 DSH 服务后刷新页面）'),
+              h('button', { className: 'kbn-btn', style: { marginTop: 10 }, onClick: () => { setError(null); refresh(false) } }, '重试'),
+            )
+          }
           return h('div', { className: 'kbn-empty' }, '加载中…')
         }
 

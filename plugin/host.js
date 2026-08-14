@@ -1,8 +1,11 @@
 // DSH Kanban 看板插件 — Host 半（静态包 dsh-kanban，ES 模块）
-// 运行环境：DSH 静态插件（真实 Node ESM），由用户预设 agent.cordis.yml 以 `name: dsh-kanban` 挂载
+// 运行环境：DSH 静态插件（真实 Node ESM），由 web profile 补丁层 cordis.patch.yml 以 insert 行 `name: dsh-kanban` 挂载到宿主平面
 // 持久化：<workspaceRoot>/DSH-kanban/kanban-store.json（经 sandboxPolicy.workspaceRoot 解析）
 // Client RPC：webServer 路由 POST /kanban/rpc（替代动态插件的 harness.handle/host.call）
-export const inject = ['fs', 'timer']
+// 硬依赖：声明后本插件会等到这些服务全部就绪才 apply（并在服务后到齐时自动重载）。
+// 若只靠 apply 内 ctx.get()，启动早期服务提供方 fiber 尚未激活时 ctx.get 会返回
+// undefined（strict 检查 fiber.state===2），导致 webServer 路由被静默跳过、页面永远「加载中」。
+export const inject = ['fs', 'timer', 'webServer', 'tools', 'subagents', 'agents', 'sandboxPolicy']
 
 export function apply(ctx) {
   const sandboxPolicy = ctx.get('sandboxPolicy')
