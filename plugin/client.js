@@ -134,6 +134,23 @@ return {
       const p = (n) => String(n).padStart(2, '0')
       return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
     }
+    const pad2 = (n) => String(n).padStart(2, '0')
+    const toLocalInput = (ts) => {
+      if (!ts) return ''
+      const d = new Date(ts)
+      if (Number.isNaN(d.getTime())) return ''
+      return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + 'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes())
+    }
+    const fromLocalInput = (v) => {
+      if (!v) return null
+      const t = new Date(v).getTime()
+      return Number.isFinite(t) ? t : null
+    }
+    const defaultScheduledInput = () => {
+      const d = new Date(Date.now() + 60 * 60 * 1000)
+      d.setSeconds(0, 0)
+      return toLocalInput(d.getTime())
+    }
 
     function call(method, args) {
       return host.call(method, args || {}).then(res => {
@@ -225,6 +242,7 @@ return {
         t.body ? h('div', { className: 'kbn-card-body' }, cap(t.body, 160)) : null,
         h('div', { className: 'kbn-card-foot' },
           t.assignee ? h('span', { className: 'kbn-chip', title: '模型：' + t.assignee }, t.assignee) : null,
+          t.status === 'scheduled' && t.scheduled_at ? h('span', { className: 'kbn-chip', title: '定时执行' }, fmtTime(t.scheduled_at) + ' 定时') : null,
           h('span', { className: 'kbn-prio ' + prioTier(t.priority), title: '优先级 ' + t.priority }, String(t.priority)),
           t.comments && t.comments.length > 0 ? h('span', { className: 'kbn-chip' }, '评论个数' + t.comments.length) : null,
           t.status === 'running' ? h('span', { className: 'kbn-run-chip' }, '运行中') : null,
@@ -269,6 +287,7 @@ return {
       const [assignee, setAssignee] = React.useState(task.assignee || '')
       const [modelOptions, setModelOptions] = React.useState([])
       const [priority, setPriority] = React.useState(task.priority || 0)
+      const [scheduledAt, setScheduledAt] = React.useState(toLocalInput(task.scheduled_at))
       const [comment, setComment] = React.useState('')
       const [err, setErr] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
@@ -335,12 +354,16 @@ return {
             h('span', { className: 'kbn-field-label' }, '描述'),
             h('textarea', { className: 'kbn-input kbn-textarea', rows: 6, value: body, onChange: e => setBody(e.target.value) }),
           ),
+          task.status === 'scheduled' ? h('div', { className: 'kbn-field' },
+            h('span', { className: 'kbn-field-label' }, '定时执行时间'),
+            h('input', { className: 'kbn-input', type: 'datetime-local', value: scheduledAt, onChange: e => setScheduledAt(e.target.value) }),
+          ) : null,
           h('button', {
             className: 'kbn-btn',
             disabled: busy || !title.trim(),
             onClick: () => act(() => call('patchTask', {
               slug: props.slug, id: task.id,
-              patch: { title: title.trim(), body, assignee, priority },
+              patch: { title: title.trim(), body, assignee, priority, scheduled_at: fromLocalInput(scheduledAt) },
             })),
           }, '保存修改'),
           h('div', { className: 'kbn-runbox' },
@@ -348,12 +371,17 @@ return {
             task.run ? h('div', { className: 'kbn-run-info' },
               h('div', null, 'Provider：' + (task.run.provider || '?') + '　Run：' + (task.run.runId || '?')),
               h('div', null, '开始：' + fmtTime(task.run.started_at) + (task.run.ended_at ? '　结束：' + fmtTime(task.run.ended_at) : '')),
+              task.run.heartbeat_at ? h('div', null, '最近活动：' + fmtTime(task.run.heartbeat_at)) : null,
               task.run.outcome === 'done' ? h('div', { className: 'kbn-run-ok' }, '结果：完成') : null,
               task.run.outcome === 'error' ? h('div', { className: 'kbn-run-bad' }, '结果：失败') : null,
               task.run.outcome === 'terminated' ? h('div', null, '结果：已终止') : null,
               task.run.summary ? h('div', { className: 'kbn-run-summary' }, task.run.summary) : null,
               task.run.error ? h('div', { className: 'kbn-run-bad' }, '错误：' + task.run.error) : null,
             ) : h('div', { className: 'kbn-run-info' }, '尚未执行过'),
+            task.run && Array.isArray(task.run.progress) && task.run.progress.length > 0 ? h('div', null,
+              h('div', { className: 'kbn-section-title', style: { marginBottom: 4 } }, '实时进度（最近 ' + task.run.progress.length + ' 行）'),
+              h('div', { className: 'kbn-run-summary' }, task.run.progress.join('\n')),
+            ) : null,
             (task.status !== 'running' && task.status !== 'archived') ? h('button', {
               className: 'kbn-btn kbn-btn-run',
               disabled: busy,
@@ -420,7 +448,10 @@ return {
       const [assignee, setAssignee] = React.useState('')
       const [modelOptions, setModelOptions] = React.useState([])
       const [priority, setPriority] = React.useState(0)
-      const [status, setStatus] = React.useState('triage')
+      const [status, setStatus] = React.useState(
+        props.lane && STATUSES.some(s => s.id === props.lane && s.id !== 'running') ? props.lane : 'triage',
+      )
+      const [scheduledAt, setScheduledAt] = React.useState(props.lane === 'scheduled' ? defaultScheduledInput() : '')
       const [busy, setBusy] = React.useState(false)
       const [err, setErr] = React.useState(null)
 
@@ -435,7 +466,10 @@ return {
         if (!title.trim()) { setErr('请填写标题'); return }
         setBusy(true)
         setErr(null)
-        call('createTask', { slug: props.slug, title: title.trim(), body, assignee, priority, status })
+        call('createTask', {
+          slug: props.slug, title: title.trim(), body, assignee, priority, status,
+          scheduled_at: status === 'scheduled' ? fromLocalInput(scheduledAt) : null,
+        })
           .then(() => { props.onCreated(); props.onClose() })
           .catch(e => { setBusy(false); setErr(String((e && e.message) || e)) })
       }
@@ -470,11 +504,15 @@ return {
             h('select', {
               className: 'kbn-input kbn-select',
               value: status,
-              onChange: e => setStatus(e.target.value),
+              onChange: e => { setStatus(e.target.value); if (e.target.value === 'scheduled' && !scheduledAt) setScheduledAt(defaultScheduledInput()) },
             },
               STATUSES.filter(s => s.id !== 'running').map(s => h('option', { key: s.id, value: s.id }, s.label)),
             ),
           ),
+          status === 'scheduled' ? h('div', { className: 'kbn-field' },
+            h('span', { className: 'kbn-field-label' }, '定时执行时间'),
+            h('input', { className: 'kbn-input', type: 'datetime-local', value: scheduledAt, onChange: e => setScheduledAt(e.target.value) }),
+          ) : null,
           h('div', { className: 'kbn-modal-actions' },
             h('button', { className: 'kbn-btn', onClick: () => props.onClose() }, '取消'),
             h('button', { className: 'kbn-btn kbn-btn-run', disabled: busy, onClick: submit }, '创建'),
@@ -522,8 +560,8 @@ return {
       const [creating, setCreating] = React.useState(false)
       const [confirmBoardDel, setConfirmBoardDel] = React.useState(false)
 
-      function refresh() {
-        call('getStore').then(data => {
+      function refresh(force) {
+        call(force ? 'reload' : 'getStore').then(data => {
           setStore(data)
           setError(null)
           setSlug(prev => {
@@ -534,8 +572,8 @@ return {
       }
 
       React.useEffect(() => {
-        refresh()
-        return ctx.interval(refresh, 5000)
+        refresh(false)
+        return ctx.interval(() => refresh(false), 5000)
       }, [])
 
       const board = (store && slug) ? store.boards.find(b => b.slug === slug) : null
@@ -593,7 +631,7 @@ return {
           confirmBoardDel ? h('button', { className: 'kbn-btn', onClick: () => setConfirmBoardDel(false) }, '取消') : null,
           h('button', { className: 'kbn-btn' + (showArchived ? ' on' : ''), onClick: () => setShowArchived(!showArchived) }, '显示归档'),
           h('button', { className: 'kbn-btn kbn-btn-run', disabled: !board, onClick: () => setDialog({ lane: 'triage' }) }, '＋ 新任务'),
-          h('button', { className: 'kbn-btn', title: '刷新', onClick: refresh }, '↻'),
+          h('button', { className: 'kbn-btn', title: '强制重读磁盘数据', onClick: () => refresh(true) }, '↻'),
         ),
         creating ? h(CreateBoardForm, { onCreated: newSlug => { setSlug(newSlug); refresh() }, onClose: () => setCreating(false) }) : null,
         selIds.length > 1 ? h(BulkBar, {

@@ -11,6 +11,12 @@ return {
 
     const STATUSES = ['triage', 'todo', 'scheduled', 'ready', 'running', 'blocked', 'review', 'done', 'archived']
 
+    // 事件循环与心跳常量
+    const LOOP_TICK_MS = 10000                       // 循环步长
+    const HEARTBEAT_TIMEOUT_MS = 30 * 60 * 1000      // 无任何活动信号超过该时长 → 判定心跳丢失
+    const PROGRESS_DIR = 'DSH-kanban/runs'           // 子代理进度文件目录（工作区相对路径）
+    const PROGRESS_CAP = 50                          // 看板保留的最近进度行数
+
     const workspaceRoot = (sandboxPolicy && typeof sandboxPolicy.workspaceRoot === 'string')
       ? sandboxPolicy.workspaceRoot
       : 'D:/WorkSpace'
@@ -167,10 +173,22 @@ return {
           let touched = healed
           for (const board of store.boards) {
             for (const task of board.tasks) {
-              if (task.status === 'running') {
+              // 仅当没有活跃运行记录时才做 worker-lost 修复（reload 重读磁盘时运行中的派发仍存活）
+              if (task.status === 'running' && !runs.has(KEY(board.slug, task.id))) {
                 task.status = 'blocked'
                 pushEvent(task, 'blocked', { reason: 'worker lost：插件重启后运行状态丢失' })
                 touched = true
+              }
+            }
+          }
+          // 向后兼容：补齐定时与心跳字段的默认值
+          for (const board of store.boards) {
+            for (const task of board.tasks) {
+              if (typeof task.scheduled_at !== 'number') task.scheduled_at = null
+              if (task.run) {
+                if (typeof task.run.heartbeat_at !== 'number') task.run.heartbeat_at = typeof task.run.started_at === 'number' ? task.run.started_at : null
+                if (!Array.isArray(task.run.progress)) task.run.progress = []
+                if (typeof task.run.progressLineCount !== 'number') task.run.progressLineCount = 0
               }
             }
           }
@@ -200,6 +218,25 @@ return {
       return trimmed ? cap(trimmed, 4000) : null
     }
 
+    // 进度文件：子代理按派发提示词约定向 <PROGRESS_DIR>/<taskId>.progress 追加进度行，
+    // 事件循环读取其尾部新行作为实时进度与（远程 provider 的）心跳兜底信号。
+    async function progressTarget(taskId) {
+      return ctx.fs.resolve(PROGRESS_DIR + '/' + taskId + '.progress', { cwd: workspaceRoot })
+    }
+    async function readProgressTail(taskId) {
+      try {
+        const text = await ctx.fs.readText(await progressTarget(taskId))
+        return String(text).split(/\r?\n/).slice(-500)
+      } catch (err) {
+        return []
+      }
+    }
+    async function resetProgressFile(taskId) {
+      try {
+        await ctx.fs.writeText(await progressTarget(taskId), '', undefined, undefined, resolvePolicy())
+      } catch (err) {}
+    }
+
     function buildPrompt(task) {
       const lines = []
       lines.push('你被派发执行一个看板任务（DeepSeek Harness kanban dispatch）。')
@@ -210,6 +247,9 @@ return {
         lines.push('【任务描述】')
         lines.push(task.body)
       }
+      lines.push('')
+      lines.push('【进度汇报】')
+      lines.push('看板会通过工作区文件 DSH-kanban/runs/' + task.id + '.progress 实时展示你的执行进度。每完成一个重要步骤（例如完成一次检查、写完一个文件、完成一次验证），请向该文件追加一行简短的中文进度说明。只追加、不覆盖、不删除该文件，也不要写入时间戳（看板会自动记录时间）。若某个步骤需要长时间执行，请在该步骤开始与结束时各追加一行。')
       if (Array.isArray(task.comments) && task.comments.length > 0) {
         lines.push('')
         lines.push('【追加评论】')
@@ -228,6 +268,7 @@ return {
         if (task.run.error) lines.push('错误：' + task.run.error)
       }
       lines.push('')
+      lines.push('【完成要求】')
       lines.push('请在当前工作区中完成该任务。完成后，用一段简短的总结说明你做了什么、结果如何、以及遗留事项（如有）。这段总结将作为任务的完成摘要写回看板。')
       return lines.join('\n')
     }
@@ -294,6 +335,15 @@ return {
       return { boards: store.boards, now: now() }
     })
 
+    route('reload', async () => {
+      // 丢弃内存缓存并强制重读磁盘（「刷新」按钮使用，例如外部改动/删除了 kanban-store.json）
+      await mutationChain
+      store = null
+      loadPromise = null
+      await load()
+      return { boards: store.boards, now: now() }
+    })
+
     route('listModels', async () => {
       const llm = ctx.get('llm')
       if (!llm || typeof llm.listProviders !== 'function') return { models: [] }
@@ -347,7 +397,7 @@ return {
       })
     })
 
-    route('createTask', async (a) => {
+    async function createTaskOp(a) {
       const title = cap(String(a.title || '').trim(), 500)
       if (!title) throw new Error('标题不能为空')
       const body = cap(String(a.body || ''), 20000)
@@ -356,18 +406,23 @@ return {
       if (Boolean(a.triage)) status = 'triage'
       const assignee = cap(String(a.assignee || ''), 200) || null
       const priority = clampInt(a.priority, 0, 9)
+      const scheduledAt = typeof a.scheduled_at === 'number' ? a.scheduled_at
+        : (typeof a.scheduled_at === 'string' && a.scheduled_at.trim() ? new Date(a.scheduled_at).getTime() : NaN)
+      const scheduled_at = Number.isFinite(scheduledAt) ? scheduledAt : null
       return mutate(() => {
         const board = findBoard(String(a.slug || ''))
         if (!board) throw new Error('看板不存在')
         const task = {
-          id: makeId('t'), title, body, status, assignee, priority,
+          id: makeId('t'), title, body, status, assignee, priority, scheduled_at,
           created_at: now(), updated_at: now(), comments: [], events: [], run: null,
         }
         pushEvent(task, 'created', { status })
         board.tasks.push(task)
         return task
       })
-    })
+    }
+
+    route('createTask', createTaskOp)
 
     route('patchTask', async (a) => {
       return mutate(() => {
@@ -393,6 +448,12 @@ return {
         if ('priority' in patch) {
           task.priority = clampInt(patch.priority, 0, 9)
           changes.push('priority')
+        }
+        if ('scheduled_at' in patch) {
+          const v = patch.scheduled_at
+          const t = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() ? new Date(v).getTime() : NaN)
+          task.scheduled_at = Number.isFinite(t) ? t : null
+          changes.push('scheduled_at')
         }
         if (changes.length === 0) return task
         task.updated_at = now()
@@ -533,6 +594,7 @@ return {
           providerName = null
         }
         if (!providerName) throw new Error('没有可用的 subagent provider')
+        await resetProgressFile(task.id)
         const signal = makeSignal()
         const startRequest = {
           label: 'kanban: ' + cap(task.title, 60),
@@ -564,11 +626,12 @@ return {
         }
         const run = await subagents.start(providerName, startRequest)
         const seq = (task.run && task.run.seq ? task.run.seq : 0) + 1
-        runs.set(KEY(slug, id), { signal, run, seq })
+        runs.set(KEY(slug, id), { signal, run, seq, slug, id })
         task.status = 'running'
         task.run = {
           provider: providerName, runId: String(run.id), seq,
           started_at: now(), ended_at: null, outcome: null, summary: null, error: null,
+          heartbeat_at: now(), progress: [], progressLineCount: 0,
         }
         task.updated_at = now()
         pushEvent(task, 'dispatched', { provider: providerName, runId: task.run.runId, model: task.assignee || null })
@@ -593,6 +656,137 @@ return {
         return { ok: true, task }
       })
     })
+
+    // —— Agent 工具：主 Agent 在对话中直接创建看板任务 ——
+    disposers.push(harness.registerTool(ctx, harness.defineTool({
+      name: 'kanban_create_task',
+      description: '在 DSH 看板中创建一张任务卡片。board 省略时使用第一个看板；status 可选 triage/todo/scheduled/ready/blocked/review/done/archived（默认 todo）；priority 为 0-9 整数，越大越优先（默认 0）；assignee 为子Agent模型名，留空表示跟随会话默认模型；scheduled_at 为 ISO 时间字符串（如 2026-08-15T10:00），仅 status=scheduled 时生效。',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: '任务标题（必填）。' },
+          body: { type: 'string', description: '任务描述/正文（可选）。' },
+          board: { type: 'string', description: '看板 slug（可选，省略时使用第一个看板）。' },
+          status: { type: 'string', enum: ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'review', 'done', 'archived'], description: '初始列，默认 todo。' },
+          priority: { type: 'number', description: '优先级 0-9，越大越优先，默认 0。' },
+          assignee: { type: 'string', description: '子Agent模型名（可选，留空跟随会话默认模型）。' },
+          scheduled_at: { type: 'string', description: '定时执行时间 ISO 字符串（可选，仅 status=scheduled 时生效）。' },
+        },
+        required: ['title'],
+      },
+      output: {
+        schema: { type: 'string' },
+        render(_args, value) { return [{ type: 'text', text: String(value) }] },
+      },
+      async execute(args) {
+        await load()
+        let slug = typeof args.board === 'string' ? args.board.trim() : ''
+        if (!slug) {
+          if (store.boards.length === 0) throw new Error('还没有任何看板：请先在页面创建看板')
+          slug = store.boards[0].slug
+        }
+        const task = await createTaskOp({
+          slug,
+          title: args.title,
+          body: args.body,
+          assignee: args.assignee,
+          priority: args.priority,
+          status: args.status,
+          scheduled_at: args.scheduled_at,
+        })
+        return '已创建看板任务：' + task.title + '（id=' + task.id + '，看板=' + slug + '，初始列=' + task.status + (task.scheduled_at ? '，定时=' + fmtTime(task.scheduled_at) : '') + '）'
+      },
+    })))
+
+    // —— 事件循环：定时列提升 + 运行心跳 + 实时进度 ——
+    let ticking = false
+    async function tick() {
+      if (ticking) return
+      ticking = true
+      try {
+        const s = await load()
+        const deadline = now() - HEARTBEAT_TIMEOUT_MS
+        const pending = []
+        const runningSnapshots = []
+        for (const board of s.boards) {
+          for (const task of board.tasks) {
+            if (task.status === 'scheduled' && typeof task.scheduled_at === 'number' && task.scheduled_at <= now()) {
+              pending.push({ slug: board.slug, id: task.id, kind: 'promote' })
+            } else if (task.status === 'running' && task.run && runs.has(KEY(board.slug, task.id))) {
+              const base = typeof task.run.heartbeat_at === 'number' ? task.run.heartbeat_at : (typeof task.run.started_at === 'number' ? task.run.started_at : 0)
+              if (base > 0 && base < deadline) {
+                pending.push({ slug: board.slug, id: task.id, kind: 'heartbeat-dead' })
+              } else {
+                runningSnapshots.push({ slug: board.slug, id: task.id, seq: task.run.seq, run: task.run })
+              }
+            }
+          }
+        }
+        const progressUpdates = []
+        for (const item of runningSnapshots) {
+          const lines = await readProgressTail(item.id)
+          const prevCount = typeof item.run.progressLineCount === 'number' ? item.run.progressLineCount : 0
+          if (lines.length > prevCount) {
+            progressUpdates.push({
+              slug: item.slug, id: item.id, seq: item.seq,
+              progress: ((item.run.progress || []).concat(lines.slice(prevCount))).slice(-PROGRESS_CAP),
+              progressLineCount: lines.length,
+              heartbeatAt: now(),
+            })
+          }
+        }
+        if (pending.length === 0 && progressUpdates.length === 0) return
+        await mutate(() => {
+          for (const p of pending) {
+            const board = findBoard(p.slug)
+            const task = board && findTask(board, p.id)
+            if (!task) continue
+            if (p.kind === 'promote') {
+              if (task.status !== 'scheduled') continue
+              task.status = 'ready'
+              task.scheduled_at = null
+              task.updated_at = now()
+              pushEvent(task, 'moved', { from: 'scheduled', to: 'ready', by: 'timer' })
+            } else if (p.kind === 'heartbeat-dead') {
+              if (task.status !== 'running') continue
+              abortRun(p.slug, p.id)
+              const reason = '心跳丢失：子代理超过 ' + Math.round(HEARTBEAT_TIMEOUT_MS / 60000) + ' 分钟无活动'
+              if (task.run) { task.run.ended_at = now(); task.run.outcome = 'error'; task.run.error = reason }
+              task.status = 'blocked'
+              task.updated_at = now()
+              pushEvent(task, 'blocked', { reason })
+            }
+          }
+          for (const u of progressUpdates) {
+            const board = findBoard(u.slug)
+            const task = board && findTask(board, u.id)
+            if (!task || !task.run || task.run.seq !== u.seq) continue
+            task.run.progress = u.progress
+            task.run.progressLineCount = u.progressLineCount
+            task.run.heartbeat_at = u.heartbeatAt
+          }
+        })
+      } catch (err) {
+        console.error('[kanban] tick failed:', String((err && err.message) || err))
+      } finally {
+        ticking = false
+      }
+    }
+    disposers.push(ctx.interval(tick, LOOP_TICK_MS))
+
+    // 子会话日志活动 → 心跳（本地 provider 的 session/event 在本进程发射）
+    disposers.push(ctx.on('session/event', (session) => {
+      if (store === null || !session) return
+      const sid = String(session.id)
+      for (const entry of runs.values()) {
+        if (!entry.run || String(entry.run.id) !== sid) continue
+        const board = findBoard(entry.slug)
+        const task = board && findTask(board, entry.id)
+        if (task && task.run && task.run.seq === entry.seq) {
+          task.run.heartbeat_at = now()
+        }
+      }
+    }))
 
     ctx.effect(() => () => {
       for (const key of Array.from(runs.keys())) {

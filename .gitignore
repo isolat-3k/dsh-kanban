@@ -1,6 +1,9 @@
 # 运行数据（看板任务/评论/事件/运行记录，自动生成与维护）
 kanban-store.json
 
+# 派发任务的子代理进度文件（自动生成与维护）
+runs/
+
 # 系统与编辑器
 Thumbs.db
 Desktop.ini
