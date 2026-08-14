@@ -147,23 +147,76 @@ window.__ModuleLoader__.load({
         const p = (n) => String(n).padStart(2, '0')
         return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
       }
-      const pad2 = (n) => String(n).padStart(2, '0')
-      const toLocalInput = (ts) => {
+      const shortId = (id) => String(id || '').replace(/^t_/, '').slice(0, 6)
+      const toHM = (dm) => {
+        const hh = Math.floor(dm / 60)
+        const mm = dm % 60
+        return String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0')
+      }
+      const fmtMinutes = (m) => {
+        if (!m) return ''
+        if (m >= 1440) {
+          const d = Math.floor(m / 1440)
+          const h = Math.round((m % 1440) / 60)
+          return h > 0 ? d + ' 天 ' + h + ' 小时' : d + ' 天'
+        }
+        if (m >= 60) {
+          const h = Math.floor(m / 60)
+          const mm = m % 60
+          return mm > 0 ? h + ' 小时 ' + mm + ' 分' : h + ' 小时'
+        }
+        return m + ' 分钟'
+      }
+      const fmtRemain = (ts) => {
+        if (!ts) return ''
+        const ms = ts - Date.now()
+        if (ms <= 0) return '已到期'
+        return '还剩 ' + fmtMinutes(Math.floor(ms / 60000))
+      }
+      const fmtAbs = (ts) => {
         if (!ts) return ''
         const d = new Date(ts)
-        if (Number.isNaN(d.getTime())) return ''
-        return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + 'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes())
+        const p = (n) => String(n).padStart(2, '0')
+        return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
       }
-      const fromLocalInput = (v) => {
-        if (!v) return null
-        const t = new Date(v).getTime()
-        return Number.isFinite(t) ? t : null
+      const scheduleKindLabel = (s) => {
+        if (!s) return ''
+        if (s.kind === 'interval') return '间隔重复 · 每' + fmtMinutes(s.intervalMinutes)
+        if (s.kind === 'daily') return '每天 ' + toHM(s.dailyMinutes)
+        return ''
       }
-      const defaultScheduledInput = () => {
-        const d = new Date(Date.now() + 60 * 60 * 1000)
-        d.setSeconds(0, 0)
-        return toLocalInput(d.getTime())
+      const scheduleChip = (s) => {
+        // 定时列卡片：方式 + 父卡片 + 「还剩xx · 绝对时间」
+        if (!s) return ''
+        const parts = []
+        const kl = scheduleKindLabel(s)
+        if (kl) parts.push(kl)
+        if (s.parentId) parts.push('父 ' + shortId(s.parentId))
+        if (typeof s.nextAt === 'number') parts.push(fmtRemain(s.nextAt) + ' · ' + fmtAbs(s.nextAt))
+        if (parts.length === 0 && !s.kind && s.parentId) parts.push('等待父卡片完成')
+        return parts.join('　')
       }
+      const defaultSchedule = (lane) => (lane === 'scheduled'
+        ? { kind: 'interval', intervalMinutes: 60, dailyTime: '09:00', parentId: '' }
+        : { kind: 'none', intervalMinutes: 60, dailyTime: '09:00', parentId: '' })
+      const schedFromTask = (task) => {
+        const s = task.schedule
+        if (!s) return { kind: 'none', intervalMinutes: 60, dailyTime: '09:00', parentId: '' }
+        return {
+          kind: s.kind || 'none',
+          intervalMinutes: typeof s.intervalMinutes === 'number' ? s.intervalMinutes : 60,
+          dailyTime: typeof s.dailyMinutes === 'number' ? toHM(s.dailyMinutes) : '09:00',
+          parentId: s.parentId || '',
+        }
+      }
+      const schedulePayload = (sched) => (sched.kind === 'none'
+        ? null
+        : {
+            kind: sched.kind,
+            intervalMinutes: sched.kind === 'interval' ? Math.max(1, Math.min(10080, Math.round(Number(sched.intervalMinutes) || 60))) : undefined,
+            dailyTime: sched.kind === 'daily' ? sched.dailyTime : undefined,
+            parentId: sched.parentId ? sched.parentId : null,
+          })
 
       function call(method, args) {
         return fetch('/kanban/rpc', {
@@ -262,7 +315,8 @@ window.__ModuleLoader__.load({
           t.body ? h('div', { className: 'kbn-card-body' }, cap(t.body, 160)) : null,
           h('div', { className: 'kbn-card-foot' },
             t.assignee ? h('span', { className: 'kbn-chip', title: '模型：' + t.assignee }, t.assignee) : null,
-            t.status === 'scheduled' && t.scheduled_at ? h('span', { className: 'kbn-chip', title: '定时执行' }, fmtTime(t.scheduled_at) + ' 定时') : null,
+            t.status === 'scheduled' && t.schedule ? h('span', { className: 'kbn-chip', title: scheduleChip(t.schedule) }, scheduleChip(t.schedule)) : null,
+            t.status !== 'scheduled' && t.schedule && t.schedule.kind ? h('span', { className: 'kbn-chip', title: '重复任务：本轮完成后自动回排定时列' }, scheduleKindLabel(t.schedule)) : null,
             h('span', { className: 'kbn-prio ' + prioTier(t.priority), title: '优先级 ' + t.priority }, String(t.priority)),
             t.comments && t.comments.length > 0 ? h('span', { className: 'kbn-chip' }, '评论个数' + t.comments.length) : null,
             t.status === 'running' ? h('span', { className: 'kbn-run-chip' }, '运行中') : null,
@@ -291,7 +345,15 @@ window.__ModuleLoader__.load({
         const p = ev.payload || {}
         if (ev.kind === 'created') return '创建任务（' + (p.status || '') + '）'
         if (ev.kind === 'edited') return '编辑字段：' + (p.fields ? p.fields.join('、') : '')
-        if (ev.kind === 'moved') return '移动：' + (p.from || '?') + ' → ' + (p.to || '?')
+        if (ev.kind === 'moved') {
+          const by = p.by
+          if (by === 'parent') return '父卡片完成 → 自动激活：' + (p.from || '?') + ' → ' + (p.to || '?')
+          if (by === 'interval') return '间隔定时到点 → 自动激活：' + (p.from || '?') + ' → ' + (p.to || '?')
+          if (by === 'daily') return '每日定时到点 → 自动激活：' + (p.from || '?') + ' → ' + (p.to || '?')
+          if (by === 'schedule') return '本轮完成 → 回排定时列：' + (p.from || '?') + ' → ' + (p.to || '?')
+          if (by === 'timer') return '旧定时到点提权：' + (p.from || '?') + ' → ' + (p.to || '?')
+          return '移动：' + (p.from || '?') + ' → ' + (p.to || '?')
+        }
         if (ev.kind === 'commented') return '添加评论'
         if (ev.kind === 'dispatched') return '派发执行（provider: ' + (p.provider || '?') + '）'
         if (ev.kind === 'completed') return '执行完成'
@@ -307,7 +369,7 @@ window.__ModuleLoader__.load({
         const [assignee, setAssignee] = React.useState(task.assignee || '')
         const [modelOptions, setModelOptions] = React.useState([])
         const [priority, setPriority] = React.useState(task.priority || 0)
-        const [scheduledAt, setScheduledAt] = React.useState(toLocalInput(task.scheduled_at))
+        const [sched, setSched] = React.useState(schedFromTask(task))
         const [comment, setComment] = React.useState('')
         const [err, setErr] = React.useState(null)
         const [busy, setBusy] = React.useState(false)
@@ -320,6 +382,27 @@ window.__ModuleLoader__.load({
             setModelOptions(list.map(String))
           }).catch(() => {})
         }, [])
+
+        // 服务端字段变化时同步本地编辑态：仅在任务真正被编辑（外部修改/其他标签页/Agent 工具）
+        // 时同步，运行进度与心跳等 5s 轮询刷新不会打断正在进行的输入。
+        const serverSigRef = React.useRef(JSON.stringify({
+          title: task.title, body: task.body, assignee: task.assignee,
+          priority: task.priority, schedule: task.schedule,
+        }))
+        React.useEffect(() => {
+          const sig = JSON.stringify({
+            title: task.title, body: task.body, assignee: task.assignee,
+            priority: task.priority, schedule: task.schedule,
+          })
+          if (sig !== serverSigRef.current) {
+            serverSigRef.current = sig
+            setTitle(task.title || '')
+            setBody(task.body || '')
+            setAssignee(task.assignee || '')
+            setPriority(task.priority || 0)
+            setSched(schedFromTask(task))
+          }
+        }, [task])
 
         function act(fn) {
           setBusy(true)
@@ -374,16 +457,46 @@ window.__ModuleLoader__.load({
               h('span', { className: 'kbn-field-label' }, '描述'),
               h('textarea', { className: 'kbn-input kbn-textarea', rows: 6, value: body, onChange: e => setBody(e.target.value) }),
             ),
-            task.status === 'scheduled' ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '定时执行时间'),
-              h('input', { className: 'kbn-input', type: 'datetime-local', value: scheduledAt, onChange: e => setScheduledAt(e.target.value) }),
+            h('div', { className: 'kbn-field' },
+              h('span', { className: 'kbn-field-label' }, '定时（停放后自动激活方式）'),
+              h('select', { className: 'kbn-input kbn-select', value: sched.kind, onChange: e => setSched({ ...sched, kind: e.target.value }) },
+                h('option', { value: 'none' }, '无（仅停放，不自动激活）'),
+                h('option', { value: 'interval' }, '间隔重复（每 N 分钟）'),
+                h('option', { value: 'daily' }, '每天固定时刻'),
+              ),
+            ),
+            sched.kind === 'interval' ? h('div', { className: 'kbn-field' },
+              h('span', { className: 'kbn-field-label' }, '间隔（分钟，1-10080，最长 7 天）'),
+              h('input', { className: 'kbn-input', type: 'number', min: 1, max: 10080, value: String(sched.intervalMinutes), onChange: e => setSched({ ...sched, intervalMinutes: e.target.value }) }),
+            ) : null,
+            sched.kind === 'daily' ? h('div', { className: 'kbn-field' },
+              h('span', { className: 'kbn-field-label' }, '每天时刻'),
+              h('input', { className: 'kbn-input', type: 'time', value: sched.dailyTime, onChange: e => setSched({ ...sched, dailyTime: e.target.value }) }),
+            ) : null,
+            h('div', { className: 'kbn-field' },
+              h('span', { className: 'kbn-field-label' }, '父卡片（可选：父卡片完成时激活；不设则不激活）'),
+              h('select', { className: 'kbn-input kbn-select', value: sched.parentId, onChange: e => setSched({ ...sched, parentId: e.target.value }) },
+                h('option', { value: '' }, '无（不设置父卡片）'),
+                (props.tasks || []).filter(t => t.id !== task.id).map(t => h('option', { key: t.id, value: t.id }, t.title + '（' + statusOf(t.status).label + '）')),
+              ),
+            ),
+            task.schedule && (task.schedule.kind || task.schedule.parentId) ? h('div', { className: 'kbn-field' },
+              h('span', { className: 'kbn-field-label' }, '当前定时'),
+              h('div', { className: 'kbn-run-info' },
+                scheduleKindLabel(task.schedule) || '等待父卡片完成',
+                task.schedule.parentId ? h('div', null, '父卡片：' + shortId(task.schedule.parentId) + '（' + (() => {
+                  const p = (props.tasks || []).find(x => x.id === task.schedule.parentId)
+                  return p ? statusOf(p.status).label : '已删除（视为已完成）'
+                })() + '）') : null,
+                typeof task.schedule.nextAt === 'number' ? h('div', null, '下次激活：' + fmtRemain(task.schedule.nextAt) + '　' + fmtAbs(task.schedule.nextAt)) : null,
+              ),
             ) : null,
             h('button', {
               className: 'kbn-btn',
               disabled: busy || !title.trim(),
               onClick: () => act(() => call('patchTask', {
                 slug: props.slug, id: task.id,
-                patch: { title: title.trim(), body, assignee, priority, scheduled_at: fromLocalInput(scheduledAt) },
+                patch: { title: title.trim(), body, assignee, priority, schedule: schedulePayload(sched) },
               })),
             }, '保存修改'),
             h('div', { className: 'kbn-runbox' },
@@ -417,7 +530,10 @@ window.__ModuleLoader__.load({
                 disabled: busy,
                 onClick: () => act(() => call('terminate', { slug: props.slug, id: task.id })),
               }, '■ 停止运行') : null,
-              task.status === 'running' ? h('div', { className: 'kbn-run-hint' }, '已派发给 DSH 子代理执行，完成后自动流转为「完成」；失败则转「阻塞」。') : null,
+              task.status === 'running' ? h('div', { className: 'kbn-run-hint' },
+                task.schedule && task.schedule.kind
+                  ? '重复任务：本轮完成后自动回到「定时」列等待下一轮；失败则转「阻塞」。'
+                  : '已派发给 DSH 子代理执行，完成后自动流转为「完成」；失败则转「阻塞」。') : null,
             ),
             h('div', { className: 'kbn-comments' },
               h('div', { className: 'kbn-section-title' }, '评论（' + ((task.comments || []).length) + '）'),
@@ -471,7 +587,7 @@ window.__ModuleLoader__.load({
         const [status, setStatus] = React.useState(
           props.lane && STATUSES.some(s => s.id === props.lane && s.id !== 'running') ? props.lane : 'triage',
         )
-        const [scheduledAt, setScheduledAt] = React.useState(props.lane === 'scheduled' ? defaultScheduledInput() : '')
+        const [sched, setSched] = React.useState(defaultSchedule(props.lane))
         const [busy, setBusy] = React.useState(false)
         const [err, setErr] = React.useState(null)
 
@@ -488,7 +604,7 @@ window.__ModuleLoader__.load({
           setErr(null)
           call('createTask', {
             slug: props.slug, title: title.trim(), body, assignee, priority, status,
-            scheduled_at: status === 'scheduled' ? fromLocalInput(scheduledAt) : null,
+            schedule: status === 'scheduled' ? schedulePayload(sched) : null,
           })
             .then(() => { props.onCreated(); props.onClose() })
             .catch(e => { setBusy(false); setErr(String((e && e.message) || e)) })
@@ -524,14 +640,33 @@ window.__ModuleLoader__.load({
               h('select', {
                 className: 'kbn-input kbn-select',
                 value: status,
-                onChange: e => { setStatus(e.target.value); if (e.target.value === 'scheduled' && !scheduledAt) setScheduledAt(defaultScheduledInput()) },
+                onChange: e => setStatus(e.target.value),
               },
                 STATUSES.filter(s => s.id !== 'running').map(s => h('option', { key: s.id, value: s.id }, s.label)),
               ),
             ),
             status === 'scheduled' ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '定时执行时间'),
-              h('input', { className: 'kbn-input', type: 'datetime-local', value: scheduledAt, onChange: e => setScheduledAt(e.target.value) }),
+              h('span', { className: 'kbn-field-label' }, '定时（停放后自动激活方式）'),
+              h('select', { className: 'kbn-input kbn-select', value: sched.kind, onChange: e => setSched({ ...sched, kind: e.target.value }) },
+                h('option', { value: 'none' }, '无（仅停放，不自动激活）'),
+                h('option', { value: 'interval' }, '间隔重复（每 N 分钟）'),
+                h('option', { value: 'daily' }, '每天固定时刻'),
+              ),
+            ) : null,
+            status === 'scheduled' && sched.kind === 'interval' ? h('div', { className: 'kbn-field' },
+              h('span', { className: 'kbn-field-label' }, '间隔（分钟，1-10080，最长 7 天）'),
+              h('input', { className: 'kbn-input', type: 'number', min: 1, max: 10080, value: String(sched.intervalMinutes), onChange: e => setSched({ ...sched, intervalMinutes: e.target.value }) }),
+            ) : null,
+            status === 'scheduled' && sched.kind === 'daily' ? h('div', { className: 'kbn-field' },
+              h('span', { className: 'kbn-field-label' }, '每天时刻'),
+              h('input', { className: 'kbn-input', type: 'time', value: sched.dailyTime, onChange: e => setSched({ ...sched, dailyTime: e.target.value }) }),
+            ) : null,
+            status === 'scheduled' ? h('div', { className: 'kbn-field' },
+              h('span', { className: 'kbn-field-label' }, '父卡片（可选：父卡片完成时激活；不设则不激活）'),
+              h('select', { className: 'kbn-input kbn-select', value: sched.parentId, onChange: e => setSched({ ...sched, parentId: e.target.value }) },
+                h('option', { value: '' }, '无（不设置父卡片）'),
+                (props.tasks || []).map(t => h('option', { key: t.id, value: t.id }, t.title + '（' + statusOf(t.status).label + '）')),
+              ),
             ) : null,
             h('div', { className: 'kbn-modal-actions' },
               h('button', { className: 'kbn-btn', onClick: () => props.onClose() }, '取消'),
@@ -697,6 +832,7 @@ window.__ModuleLoader__.load({
           drawerTask ? h(Drawer, {
             key: drawerTask.id,
             task: drawerTask,
+            tasks,
             slug,
             onClose: () => setDrawerId(null),
             onChanged: () => refresh(false),
@@ -704,6 +840,7 @@ window.__ModuleLoader__.load({
           dialog ? h(NewTaskDialog, {
             lane: dialog.lane,
             slug,
+            tasks,
             onClose: () => setDialog(null),
             onCreated: () => refresh(false),
           }) : null,

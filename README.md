@@ -54,17 +54,17 @@ DSH-kanban/
 ## 功能清单
 
 - **9 列泳道**：待细化 → 待办 → 定时 → 就绪 → 运行中 → 阻塞 → 审核 → 完成 → 归档（配色沿用 Hermes `COLUMN_META`）；空列自动收窄为竖条（含竖排列名），点列头可手动折叠/展开；归档列默认隐藏可切换显示
-- **任务卡片**：标题（两行截断）、正文摘要、优先级徽章、负责人、定时时间、评论数、运行中标记、卡片年龄、按列着色左边条
+- **任务卡片**：标题（两行截断）、正文摘要、优先级徽章、负责人、定时徽章（「还剩xx · 绝对时间」）、评论数、运行中标记、卡片年龄、按列着色左边条
 - **拖拽换列**：HTML5 原生拖放（与 Hermes board.tsx 同模式）
 - **Ctrl/Cmd 多选 + 批量操作条**：批量移动状态 / 批量删除
 - **按列筛选**：标题 / 正文 / ID 全文过滤
-- **定时列自动化**（事件循环）：任务带「定时执行时间」放入「定时」列，到点自动流转「就绪」并记录 `by: 'timer'` 事件；不带时间的定时任务保持停放（需在抽屉设置时间）。新建任务选定时列默认 +1 小时，可改
-- **详情抽屉**：彩色状态迁移按钮、标题/描述/负责人/优先级/定时时间编辑、评论线程、完整事件时间线、执行控制台（运行信息 + 最近活动 + 实时进度 + 结果摘要/错误）
+- **定时列自动化**（新定时模型）：任务带 `schedule` 放入「定时」列后按设定自动激活进「就绪」——**interval 间隔重复**（每 N 分钟，到点激活记录 `by: 'interval'`，本轮完成后自动回排定时列等下一轮）、**daily 每天固定时刻**（`by: 'daily'`）、**父卡片事件激活**（父卡片完成/归档/被删除时激活 `by: 'parent'`；可不设父卡片 = 不激活）。激活由每任务一个 `ctx.timeout` 驱动（不再全局扫描）；无 schedule 的定时任务保持纯停放
+- **详情抽屉**：彩色状态迁移按钮、标题/描述/负责人/优先级/定时方式（间隔/每天/父卡片）编辑、评论线程、完整事件时间线、执行控制台（运行信息 + 最近活动 + 实时进度 + 结果摘要/错误）
 - **多看板**：创建 / 切换 / 删除看板
-- **DSH 代理派发**（核心）：Ready 任务点「▶ 派发给 DSH 代理执行」→ 宿主在当前会话下启动 DSH 子代理执行任务 → 完成后自动转「完成」并回写结果摘要；失败转「阻塞」并记录错误；可「■ 停止运行」（任务回到就绪）
-- **运行心跳**（事件循环）：子会话日志活动（`session/event`）与进度文件更新都会刷新 `heartbeat_at`；超过 30 分钟无任何信号 → 终止运行并转「阻塞」（原因：心跳丢失），杜绝"假运行"卡片
+- **DSH 代理派发**（核心）：Ready 任务点「▶ 派发给 DSH 代理执行」→ 宿主启动 DSH 子代理执行任务（Agent 工具渠道挂靠当前发起代理；UI 渠道优先挂靠最近有会话活动的根代理，其次第一个根）→ 完成后自动转「完成」并回写结果摘要；失败转「阻塞」并记录错误；可「■ 停止运行」（任务回到就绪）
+- **运行心跳**（事件循环）：子会话日志活动（`session/event`）与进度文件更新都会刷新 `heartbeat_at`；超过 30 分钟无任何信号 → 终止运行并转「阻塞」（原因：心跳丢失），杜绝"假运行"卡片；超时可用环境变量 `DSH_KANBAN_HEARTBEAT_MS`（毫秒）覆盖
 - **实时进度**（事件循环）：派发提示词要求子代理向 `DSH-kanban/runs/<任务ID>.progress` 追加进度行，循环读取并在抽屉「执行」区显示最近 50 行
-- **Agent 渠道**：Host 注册模型工具 `kanban_create_task`，主 Agent 可在对话中直接创建看板任务（标题必填；看板/初始列/优先级/子Agent模型/定时时间可选），与 UI 创建走同一套校验、事件与落盘逻辑
+- **Agent 渠道**：Host 注册模型工具 `kanban_create_task`，主 Agent 可在对话中直接创建看板任务（标题必填；看板/初始列/优先级/子Agent模型/定时 schedule 可选），与 UI 创建走同一套校验（含父卡片环检测）、事件与落盘逻辑
 - **持久化**：每次变更 250ms 防抖落盘；刷新页面、重跑插件、重启 DSH 数据都不丢
 
 ## 入口
@@ -82,7 +82,14 @@ DSH-kanban/
       "id": "t_xxx", "title": "…", "body": "…",
       "status": "triage|todo|scheduled|ready|running|blocked|review|done|archived",
       "assignee": null | "标签", "priority": 0|1|2,
-      "scheduled_at": null | 1786642238696,  // 定时执行时间（epoch 毫秒），仅 scheduled 状态生效
+      "schedule": null | {
+        "kind": "interval" | "daily" | null,   // interval=间隔重复，daily=每天固定时刻；null 且无 parentId 时纯停放
+        "intervalMinutes": 30,                  // kind=interval 时：间隔分钟（1-10080，最长 7 天）
+        "dailyMinutes": 540,                    // kind=daily 时：当天第几分钟（如 09:00 → 540）
+        "parentId": null | "t_xxx",             // 可选父卡片：父完成/归档/被删除时激活；不设则不激活
+        "base": 1786642238696,                  // kind=interval 时：整倍数网格锚点（编辑保留，回排不随运行时长漂移）
+        "nextAt": 1786642238696 | null          // 下一次激活时间（epoch 毫秒）；激活后置 null，重复任务在完成后回排
+      },
       "created_at": …, "updated_at": …,
       "comments": [{ "id": "c_xxx", "author": "user", "body": "…", "created_at": … }],
       "events":  [{ "id": 1, "kind": "created|edited|moved|commented|dispatched|completed|terminated|blocked", "payload": {}, "created_at": … }],
@@ -103,7 +110,7 @@ DSH-kanban/
 | Hermes | 本插件 |
 |---|---|
 | 60s 调度器自动派发 Ready 任务 | **手动点「运行」派发**（避免意外消耗 token） |
-| scheduled 列有定时唤醒语义 | 事件循环每 10s 检查，到点自动流转「就绪」（`by: 'timer'`） |
+| scheduled 列仅停放（时间归 cron，唤醒靠 agent 执行 `kanban unblock`） | **任务级 schedule**：interval / daily 每任务一个 `ctx.timeout` 到点激活；父卡片完成事件激活 |
 | 运行中的代理可轮询新评论 | 评论仅记录；运行期间新评论不实时送达（重跑时经【追加评论】随任务正文带入） |
 | 代理心跳 + 超时回收（`last_heartbeat_at`） | 子会话日志活动 + 进度文件双重信号刷新心跳；30 分钟无信号 → 终止并转「阻塞」 |
 | WebSocket 实时推送 | 5s 轮询 + 每次操作后立即刷新 |
@@ -141,8 +148,10 @@ DSH-kanban/
 - 插件停止/更新/DSH 重启时，处于「运行中」的任务会被标记为「阻塞」（原因：worker lost / 插件已停止），需手动移回就绪重新派发——与 Hermes 的 stale 心跳处理同思路，不产生"假运行"卡片
 - `running` 列只能通过派发进入，不能手动拖入（防止伪造运行状态）
 - 删除看板会终止其中所有运行中的派发
-- 心跳超时 30 分钟为插件常量（`HEARTBEAT_TIMEOUT_MS`）：单步长时间执行且既不写进度文件也不产生会话日志的任务，可能在无信号 30 分钟后被判定「心跳丢失」；此类任务请在任务描述中说明，或由代理按提示词在长步骤前后追加进度行
-- 手动/批量移入「定时」列的任务不会自动获得定时时间（保持停放），需在抽屉设置「定时执行时间」；到点提升后 `scheduled_at` 置空，避免重复触发
+- 心跳超时默认 30 分钟（`HEARTBEAT_TIMEOUT_MS`，可用环境变量 `DSH_KANBAN_HEARTBEAT_MS` 覆盖）：单步长时间执行且既不写进度文件也不产生会话日志的任务，可能在无信号 30 分钟后被判定「心跳丢失」；此类任务请在任务描述中说明，或由代理按提示词在长步骤前后追加进度行
+- RPC 路由 `/kanban/rpc` 校验浏览器 Origin 与 Host 一致（跨站请求返回 403）；命令行等无 Origin 头的客户端不受影响
+- 手动/批量移入「定时」列的任务默认纯停放（不自动激活），需在抽屉设置定时方式（间隔/每天/父卡片）；带重复定时（interval/daily）的任务拖离「定时」列到除「就绪」以外的列会**清除其定时**（终止循环）；重复任务本轮执行失败转「阻塞」后需手动移回「定时」列才会重新排期
+- 旧版数据的 `scheduled_at` 字段在加载时自动删除（旧定时系统已移除）
 
 ## 变更记录
 
@@ -170,3 +179,5 @@ DSH-kanban/
 - 2026-08-14：**挂载方式迁移：告别预设**——看板不再经用户预设「看板」挂载（该预设目录 `~/.dsh/.agent-presets/kanban/` 已删除），改为 web profile 补丁层 `~/.dsh/profiles/web/cordis.patch.yml` 的 `insert` 行挂载到宿主平面：进程启动即生效，任意预设的会话都获得看板 RPC、两个 Agent 工具与「看板」标签页，与预设选择、会话创建顺序无关。插件代码零改动（其 Host 半本就通过 `ctx.get` 消费宿主平面服务，并把工具全局注册进宿主 tools 注册表）。删除前扫描了全部会话日志，无一会话记录 `kanban` 预设，删除不影响任何会话恢复。
 - 2026-08-14：**静态化迁移（告别动态插件）**——插件改为静态包 `dsh-kanban`（`plugin/`：ES 模块 Host + `dsh.client` 浏览器 bundle + `package.json` + `index.js` 根再导出），由用户预设「看板」（`~/.dsh/.agent-presets/kanban/`，standard 组合 + `dsh-kanban` 行）挂载，经 `~/.dsh/profiles/node_modules/dsh-kanban` 目录联接解析；RPC 由动态插件的 `harness.handle/host.call` 改为 webServer 路由 `POST /kanban/rpc`（fetch），工具注册由 `harness.registerTool` 改为 `ctx.get('tools').register`，客户端样式注入改为自建 `<style data-plugin-css>`；新增 `kanban_dispatch_task` 工具（派发「就绪」任务）。已通过 `standingKeyFor` 挂载验证（validate=OK）与 Web 引导图确认（`/plugins/dsh-kanban/client.js`、`POST /kanban/rpc` 均 200）。更新流程：改 Host 重启 DSH，改 Client 刷新页面。
 - 2026-08-14：**修复看板页永远「加载中」**——根因：插件 `inject` 只声明了 `fs/timer`，fiber 在启动早期即加载，此时 webServer 提供方 fiber 尚未激活，`ctx.get('webServer')`（strict 模式要求提供方 `fiber.state===2`）返回 `undefined`，路由注册被 `if (web && ...)` 静默跳过且不再重试；而 tools 服务加载早，工具分支正常注册（症状：Agent 工具可用、`POST /kanban/rpc` 405、页面无限加载）。修复：`inject` 补全 `webServer/tools/subagents/agents/sandboxPolicy`，Cordis 会等服务就绪再 apply（并在服务后到齐时自动重载）；同时客户端在初始加载失败时显示真实错误与「重试」按钮，不再永远显示「加载中…」。生效方式：改 Host 需重启 DSH（本次修复核心在 Host），改 Client 刷新页面即可。
+- 2026-08-14：**定时系统重做**——移除旧 `scheduled_at` 单时间戳 + 10s 循环提权；任务新增 `schedule` 对象：`interval`（每 N 分钟间隔重复，激活 `by:'interval'`，本轮完成后自动回排定时列）、`daily`（每天固定时刻，`by:'daily'`）、`parentId`（父卡片完成/归档/被删除时事件激活，`by:'parent'`；不设父卡片则不激活；kind 与父卡片同时设置时需两者都满足）。激活由每任务一个 `ctx.timeout` 驱动（`syncTimers` 对账，错过快进到未来一次，过期时以 30s 复查防热循环），事件循环只保留心跳与进度读取。卡片徽章/抽屉同时显示「还剩xx」与「绝对时间」。拖离定时列到除就绪外的列会清除定时；重复任务失败转阻塞后需手动移回定时列重新排期。加载时自动删除旧 `scheduled_at` 字段（数据迁移）。`kanban_create_task` 工具的定时参数尚未同步（后续补齐）。生效方式：改 Host 需重启 DSH，改 Client 刷新页面。
+- 2026-08-15：**修复批次（代码审查后）**——① **停止运行竞态**：`terminate` 置就绪后，迟到的 `run.result`（stopReason=aborted）会经 settle 把任务覆盖为「阻塞/失败」；`settleRun`/`settleError` 增加 `outcome !== null` 守卫（终止/拖离/心跳超时均已先落 outcome），「已终止」不再被迟到结果覆盖。② **Agent 工具对齐新定时模型**：`kanban_create_task` 删除已失效的 `scheduled_at` 死参数，新增 `schedule` 对象参数（kind/intervalMinutes/dailyTime/parentId），与 UI 同走 `normalizeSchedule` 校验。③ **父卡片链环检测**：设置 parentId 时沿现有父链向上查找，祖先成环直接报错，杜绝 A 等 B、B 等 A 死锁。④ **interval 锚点防漂移**：schedule 新增 `base` 锚点（编辑保留、加载时对存量数据补齐），回排按整倍数网格计算，每 N 分钟语义不再随运行时长漂移。⑤ **RPC 同源校验**：Origin 与 Host 不一致的浏览器请求返回 403。⑥ **UI 派发父会话选择**：优先最近有会话活动的根代理（`lastActiveRootId`，由 `session/event` 追踪），其次第一个根。⑦ 心跳超时支持环境变量 `DSH_KANBAN_HEARTBEAT_MS` 覆盖。⑧ dispose 落盘返回 Promise（宿主等待清理回调时可保证最终写入）。⑨ 清理 `createTaskOp` 死参数 triage。⑩ 客户端抽屉编辑态在服务端字段真正变化时自动同步（外部修改不丢、5s 轮询不打断输入）。生效方式：改 Host 需重启 DSH，改 Client 刷新页面。

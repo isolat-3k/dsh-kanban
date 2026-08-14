@@ -16,7 +16,11 @@ export function apply(ctx) {
 
   // 事件循环与心跳常量
   const LOOP_TICK_MS = 10000                       // 循环步长
-  const HEARTBEAT_TIMEOUT_MS = 30 * 60 * 1000      // 无任何活动信号超过该时长 → 判定心跳丢失
+  // 无任何活动信号超过该时长 → 判定心跳丢失；默认 30 分钟，可用环境变量 DSH_KANBAN_HEARTBEAT_MS 覆盖（毫秒）
+  const HEARTBEAT_TIMEOUT_MS = (() => {
+    const n = Number(process.env.DSH_KANBAN_HEARTBEAT_MS)
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : 30 * 60 * 1000
+  })()
   const PROGRESS_DIR = 'DSH-kanban/runs'           // 子代理进度文件目录（工作区相对路径）
   const PROGRESS_CAP = 50                          // 看板保留的最近进度行数
 
@@ -31,6 +35,8 @@ export function apply(ctx) {
   let writePending = false
   let eventSeq = 0
   const runs = new Map()
+  const timers = new Map() // 每任务一个 ctx.timeout：key = slug::id，只给「定时列 + 有 kind + nextAt」的任务武装
+  let lastActiveRootId = null // 最近有会话活动的根代理 id（UI 派发无 initiator 时优先挂靠）
 
   const KEY = (slug, id) => slug + '::' + id
   const now = () => Date.now()
@@ -52,6 +58,125 @@ export function apply(ctx) {
     return /^[a-z0-9]/.test(v) ? v : ''
   }
   const slugify = (name) => normSlug(name) || ('board-' + Math.random().toString(36).slice(2, 8))
+
+  // —— 定时模型（取代旧 scheduled_at）：interval 间隔重复 / daily 每天固定时刻 / 父卡片事件激活 ——
+  // schedule: null | { kind: 'interval'|'daily'|null, intervalMinutes, dailyMinutes, parentId, nextAt }
+  // 激活条件（全部满足才激活）：父卡片（若有）已 done/archived；kind（若有）的 nextAt 已到。
+  // 无 kind 且无 parentId 视为纯停放（永不自动激活）。
+  const MINUTE_MS = 60 * 1000
+  const DAY_MS = 24 * 60 * MINUTE_MS
+  const MAX_INTERVAL_MINUTES = 7 * 24 * 60 // 7 天（setTimeout 上限内）
+
+  function nextAtFor(schedule, baseMs) {
+    // 下一次激活时间：严格晚于 now；间隔重复按锚点整倍数（错过则快进到未来最近一格），每天按当天时刻
+    if (schedule.kind === 'interval') {
+      const intervalMs = schedule.intervalMinutes * MINUTE_MS
+      const base = typeof baseMs === 'number' ? baseMs : now()
+      const n = Math.max(1, Math.floor((now() - base) / intervalMs) + 1)
+      return base + n * intervalMs
+    }
+    if (schedule.kind === 'daily') {
+      const base = typeof baseMs === 'number' ? baseMs : now()
+      const d = new Date(base)
+      let target = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, schedule.dailyMinutes, 0, 0).getTime()
+      if (target <= base) target += DAY_MS
+      if (target <= now()) target += DAY_MS
+      return target
+    }
+    return null
+  }
+
+  // 统一排期入口：interval 以锚点 base 起算（编辑/回排不漂移），daily 以当前时刻起算
+  function scheduleNextAt(schedule) {
+    if (schedule.kind === 'interval') return nextAtFor(schedule, typeof schedule.base === 'number' ? schedule.base : now())
+    if (schedule.kind === 'daily') return nextAtFor(schedule, now())
+    return null
+  }
+
+  function normalizeSchedule(input, board, selfId, prev) {
+    // input: { kind, intervalMinutes, dailyTime, parentId } | null
+    if (input === null || input === undefined) return null
+    if (typeof input !== 'object') throw new Error('定时设置无效')
+    const kind = input.kind === 'interval' || input.kind === 'daily' ? input.kind : null
+    if (input.kind && !kind) throw new Error('定时方式只支持 interval（间隔重复）或 daily（每天固定时刻）')
+    let intervalMinutes = null
+    let dailyMinutes = null
+    if (kind === 'interval') {
+      const n = Math.round(Number(input.intervalMinutes))
+      if (!Number.isFinite(n) || n < 1 || n > MAX_INTERVAL_MINUTES) throw new Error('间隔需为 1-' + MAX_INTERVAL_MINUTES + ' 分钟（最长 7 天）')
+      intervalMinutes = n
+    }
+    if (kind === 'daily') {
+      const v = String(input.dailyTime || '').trim()
+      const m = /^(\d{1,2}):(\d{2})$/.exec(v)
+      if (!m) throw new Error('每天时刻需为 HH:MM 格式')
+      const hh = Number(m[1])
+      const mm = Number(m[2])
+      if (hh > 23 || mm > 59) throw new Error('每天时刻无效（00:00-23:59）')
+      dailyMinutes = hh * 60 + mm
+    }
+    let parentId = null
+    if (input.parentId !== null && input.parentId !== undefined && String(input.parentId).trim()) {
+      parentId = String(input.parentId).trim().slice(0, 64)
+      if (parentId === selfId) throw new Error('父卡片不能是自己')
+      if (board && !findTask(board, parentId)) throw new Error('父卡片不存在（需在同一看板内）')
+      if (board && selfId) {
+        // 环检测：沿现有父链向上查找，若包含 selfId 则构成循环依赖（A 等 B、B 等 A 死锁）
+        const seen = new Set()
+        let cur = parentId
+        while (cur && !seen.has(cur)) {
+          seen.add(cur)
+          if (cur === selfId) throw new Error('父卡片链存在循环依赖：不能把祖先任务设为自己的父卡片')
+          const p = findTask(board, cur)
+          cur = (p && p.schedule && p.schedule.parentId) || null
+        }
+      }
+    }
+    if (!kind && !parentId) return null
+    const schedule = { kind, intervalMinutes, dailyMinutes, parentId, nextAt: null }
+    if (kind === 'interval') {
+      // 间隔锚点：编辑时保留原锚点（维持整倍数网格），新建时以当前时刻为锚
+      schedule.base = (prev && prev.kind === 'interval' && typeof prev.base === 'number') ? prev.base : now()
+    }
+    if (kind) schedule.nextAt = scheduleNextAt(schedule)
+    return schedule
+  }
+
+  function canActivate(board, task) {
+    const s = task.schedule
+    if (!s) return false
+    if (!s.kind && !s.parentId) return false
+    if (s.parentId) {
+      const p = findTask(board, s.parentId)
+      if (p && p.status !== 'done' && p.status !== 'archived') return false
+    }
+    if (s.kind === 'interval' || s.kind === 'daily') {
+      if (typeof s.nextAt !== 'number' || s.nextAt > now()) return false
+    }
+    return true
+  }
+
+  function tryActivate(slug, task, preferBy) {
+    if (!task || task.status !== 'scheduled') return
+    const board = findBoard(slug)
+    if (!board || !canActivate(board, task)) return
+    const s = task.schedule
+    const by = preferBy || ((s.kind === 'interval' || s.kind === 'daily') ? s.kind : 'parent')
+    task.status = 'ready'
+    task.updated_at = now()
+    s.nextAt = null // 本轮已触发；重复任务的下一轮在 settle 完成后回排
+    pushEvent(task, 'moved', { from: 'scheduled', to: 'ready', by })
+  }
+
+  function activateChildren(slug, parentTask) {
+    const board = findBoard(slug)
+    if (!board || !parentTask) return
+    for (const t of board.tasks) {
+      if (t.status === 'scheduled' && t.schedule && t.schedule.parentId === parentTask.id) {
+        tryActivate(slug, t, 'parent')
+      }
+    }
+  }
 
   function makeSignal() {
     const listeners = new Set()
@@ -128,10 +253,48 @@ export function apply(ctx) {
       await load()
       const out = await fn()
       scheduleWrite()
+      syncTimers()
       return out
     })
     mutationChain = op.catch(() => {})
     return op
+  }
+
+  // 定时器对账：为「定时列 + interval/daily + nextAt」的任务各武装一个 ctx.timeout；
+  // 已过期的 nextAt 以 30s 为最小复查间隔（等父卡片时避免 0ms 热循环），未来时间精确延时。
+  function syncTimers() {
+    if (store === null) return
+    const wanted = new Set()
+    for (const board of store.boards) {
+      for (const task of board.tasks) {
+        if (task.status !== 'scheduled' || !task.schedule) continue
+        const kind = task.schedule.kind
+        if (kind !== 'interval' && kind !== 'daily') continue
+        if (typeof task.schedule.nextAt !== 'number') continue
+        const key = KEY(board.slug, task.id)
+        wanted.add(key)
+        if (timers.has(key)) continue
+        const overdue = task.schedule.nextAt - now() <= 0
+        const delay = overdue ? 30000 : task.schedule.nextAt - now()
+        const slug = board.slug
+        const id = task.id
+        timers.set(key, ctx.timeout(() => {
+          timers.delete(key)
+          mutate(() => {
+            const b = findBoard(slug)
+            const t = b && findTask(b, id)
+            if (t && t.status === 'scheduled') tryActivate(slug, t)
+          }).catch(() => {})
+        }, delay))
+      }
+    }
+    for (const key of Array.from(timers.keys())) {
+      if (!wanted.has(key)) {
+        const dispose = timers.get(key)
+        try { dispose() } catch (err) {}
+        timers.delete(key)
+      }
+    }
   }
 
   async function load() {
@@ -180,14 +343,35 @@ export function apply(ctx) {
             }
           }
         }
-        // 向后兼容：补齐定时与心跳字段的默认值
+        // 向后兼容：补齐心跳字段的默认值
         for (const board of store.boards) {
           for (const task of board.tasks) {
-            if (typeof task.scheduled_at !== 'number') task.scheduled_at = null
             if (task.run) {
               if (typeof task.run.heartbeat_at !== 'number') task.run.heartbeat_at = typeof task.run.started_at === 'number' ? task.run.started_at : null
               if (!Array.isArray(task.run.progress)) task.run.progress = []
               if (typeof task.run.progressLineCount !== 'number') task.run.progressLineCount = 0
+            }
+          }
+        }
+        // 迁移：移除旧定时系统（scheduled_at 字段）；新 schedule 缺 nextAt 的重复任务按当前时间补排
+        for (const board of store.boards) {
+          for (const task of board.tasks) {
+            if ('scheduled_at' in task) {
+              delete task.scheduled_at
+              touched = true
+            }
+            const sc = task.schedule
+            if (sc && typeof sc === 'object') {
+              if (sc.kind !== 'interval' && sc.kind !== 'daily') sc.kind = null
+              if (sc.kind === 'interval' && (typeof sc.intervalMinutes !== 'number' || sc.intervalMinutes < 1 || sc.intervalMinutes > MAX_INTERVAL_MINUTES)) sc.kind = null
+              if (sc.kind === 'daily' && typeof sc.dailyMinutes !== 'number') sc.kind = null
+              if (typeof sc.parentId !== 'string' || !sc.parentId) sc.parentId = null
+              if (sc.kind === 'interval' && typeof sc.base !== 'number') { sc.base = now(); touched = true }
+              if (!sc.kind && !sc.parentId) { task.schedule = null; touched = true }
+              else if (sc.kind && typeof sc.nextAt !== 'number') { sc.nextAt = scheduleNextAt(sc); touched = true }
+            } else if ('schedule' in task && task.schedule !== null) {
+              task.schedule = null
+              touched = true
             }
           }
         }
@@ -277,15 +461,24 @@ export function apply(ctx) {
       await mutate(() => {
         const board = findBoard(slug)
         const task = board && findTask(board, id)
-        if (!task || !task.run || task.run.seq !== seq) return
+        if (!task || !task.run || task.run.seq !== seq || task.run.outcome !== null) return
         runs.delete(KEY(slug, id))
         task.run.ended_at = now()
         const text = extractText(result && result.output)
         if (result && result.stopReason === 'completed') {
-          task.status = 'done'
           task.run.outcome = 'done'
           task.run.summary = text
           pushEvent(task, 'completed', { summary: text || null })
+          const repeat = task.schedule && (task.schedule.kind === 'interval' || task.schedule.kind === 'daily')
+          if (repeat) {
+            // 重复任务：本轮完成 → 回排「定时」列，等待下一轮（按锚点整倍数排期，不随运行时长漂移）
+            task.status = 'scheduled'
+            task.schedule.nextAt = scheduleNextAt(task.schedule)
+            pushEvent(task, 'moved', { from: 'running', to: 'scheduled', by: 'schedule' })
+          } else {
+            task.status = 'done'
+            activateChildren(slug, task)
+          }
         } else {
           task.status = 'blocked'
           task.run.outcome = 'error'
@@ -304,7 +497,7 @@ export function apply(ctx) {
       await mutate(() => {
         const board = findBoard(slug)
         const task = board && findTask(board, id)
-        if (!task || !task.run || task.run.seq !== seq) return
+        if (!task || !task.run || task.run.seq !== seq || task.run.outcome !== null) return
         runs.delete(KEY(slug, id))
         task.run.ended_at = now()
         task.run.outcome = 'error'
@@ -335,6 +528,7 @@ export function apply(ctx) {
     store = null
     loadPromise = null
     await load()
+    syncTimers()
     return { boards: store.boards, now: now() }
   })
 
@@ -397,21 +591,19 @@ export function apply(ctx) {
     const body = cap(String(a.body || ''), 20000)
     let status = STATUSES.indexOf(a.status) >= 0 ? a.status : 'todo'
     if (status === 'running') throw new Error('running 列只能通过派发进入')
-    if (Boolean(a.triage)) status = 'triage'
     const assignee = cap(String(a.assignee || ''), 200) || null
     const priority = clampInt(a.priority, 0, 9)
-    const scheduledAt = typeof a.scheduled_at === 'number' ? a.scheduled_at
-      : (typeof a.scheduled_at === 'string' && a.scheduled_at.trim() ? new Date(a.scheduled_at).getTime() : NaN)
-    const scheduled_at = Number.isFinite(scheduledAt) ? scheduledAt : null
     return mutate(() => {
       const board = findBoard(String(a.slug || ''))
       if (!board) throw new Error('看板不存在')
+      const schedule = normalizeSchedule(a.schedule, board, null)
       const task = {
-        id: makeId('t'), title, body, status, assignee, priority, scheduled_at,
+        id: makeId('t'), title, body, status, assignee, priority, schedule,
         created_at: now(), updated_at: now(), comments: [], events: [], run: null,
       }
       pushEvent(task, 'created', { status })
       board.tasks.push(task)
+      if (status === 'scheduled') tryActivate(String(a.slug || ''), task) // 父已完成等条件已满足时立即激活
       return task
     })
   }
@@ -443,15 +635,14 @@ export function apply(ctx) {
         task.priority = clampInt(patch.priority, 0, 9)
         changes.push('priority')
       }
-      if ('scheduled_at' in patch) {
-        const v = patch.scheduled_at
-        const t = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() ? new Date(v).getTime() : NaN)
-        task.scheduled_at = Number.isFinite(t) ? t : null
-        changes.push('scheduled_at')
+      if ('schedule' in patch) {
+        task.schedule = normalizeSchedule(patch.schedule, board, task.id, task.schedule)
+        changes.push('schedule')
       }
       if (changes.length === 0) return task
       task.updated_at = now()
       pushEvent(task, 'edited', { fields: changes })
+      if (task.status === 'scheduled' && changes.indexOf('schedule') >= 0) tryActivate(String(a.slug || ''), task) // 新设的父已完成等条件已满足时立即激活
       return task
     })
   })
@@ -476,6 +667,14 @@ export function apply(ctx) {
       task.status = status
       task.updated_at = now()
       pushEvent(task, 'moved', { from, to: status, by: 'manual' })
+      if (status === 'scheduled' && task.schedule && task.schedule.kind && typeof task.schedule.nextAt !== 'number') {
+        task.schedule.nextAt = scheduleNextAt(task.schedule)
+      }
+      if (from === 'scheduled' && status !== 'ready' && status !== 'scheduled' && task.schedule) {
+        task.schedule = null
+        pushEvent(task, 'edited', { fields: ['schedule'] })
+      }
+      if (status === 'done' || status === 'archived') activateChildren(slug, task)
       return task
     })
   })
@@ -504,6 +703,14 @@ export function apply(ctx) {
           task.status = status
           task.updated_at = now()
           pushEvent(task, 'moved', { from, to: status, by: 'bulk' })
+          if (status === 'scheduled' && task.schedule && task.schedule.kind && typeof task.schedule.nextAt !== 'number') {
+            task.schedule.nextAt = scheduleNextAt(task.schedule)
+          }
+          if (from === 'scheduled' && status !== 'ready' && status !== 'scheduled' && task.schedule) {
+            task.schedule = null
+            pushEvent(task, 'edited', { fields: ['schedule'] })
+          }
+          if (status === 'done' || status === 'archived') activateChildren(slug, task)
           results.push({ id, ok: true })
         } catch (err) {
           results.push({ id, ok: false, error: String((err && err.message) || err) })
@@ -524,7 +731,9 @@ export function apply(ctx) {
         const idx = board.tasks.findIndex(t => t.id === id)
         if (idx < 0) { results.push({ id, ok: false, error: '任务不存在' }); continue }
         abortRun(slug, id)
+        const removed = board.tasks[idx]
         board.tasks.splice(idx, 1)
+        activateChildren(slug, removed) // 父被删除视为已完成，释放等待它的子任务
         results.push({ id, ok: true })
       }
       return { results }
@@ -540,7 +749,9 @@ export function apply(ctx) {
       const idx = board.tasks.findIndex(t => t.id === id)
       if (idx < 0) throw new Error('任务不存在')
       abortRun(slug, id)
+      const removed = board.tasks[idx]
       board.tasks.splice(idx, 1)
+      activateChildren(slug, removed) // 父被删除视为已完成，释放等待它的子任务
       return { ok: true }
     })
   })
@@ -573,8 +784,12 @@ export function apply(ctx) {
       if (task.status !== 'ready') throw new Error('只有 ready 状态的任务可以派发')
       if (runs.has(KEY(slug, id))) throw new Error('任务已在运行中')
       if (!subagents) throw new Error('当前 DSH 没有挂载 subagents 服务')
-      const parent = (agents && typeof agents.currentInitiator === 'function' ? agents.currentInitiator() : undefined)
-        || (agents && typeof agents.roots === 'function' ? agents.roots()[0] : undefined)
+      const initiator = (agents && typeof agents.currentInitiator === 'function' ? agents.currentInitiator() : undefined)
+      const roots = (agents && typeof agents.roots === 'function' ? agents.roots() : [])
+      // UI 按钮派发时无 initiator：优先挂靠最近有会话活动的根，其次第一个根（多会话时尽量贴近用户当前上下文）
+      const parent = initiator
+        || (lastActiveRootId && roots.find(r => String(r.id) === lastActiveRootId))
+        || roots[0]
       if (!parent) throw new Error('没有存活的代理会话可用于派发（请先在对话中开启一个会话）')
       let providerName = null
       try {
@@ -665,6 +880,17 @@ export function apply(ctx) {
           res.end()
           return
         }
+        // 同源校验：浏览器跨站请求会携带 Origin，其 host 必须与 Host 头一致，否则拒绝（防跨站触发本机 RPC）
+        const origin = String((req.headers && req.headers.origin) || '')
+        if (origin) {
+          let same = false
+          try { same = new URL(origin).host === String((req.headers && req.headers.host) || '') } catch (err) {}
+          if (!same) {
+            res.statusCode = 403
+            res.end()
+            return
+          }
+        }
         let payload = {}
         try {
           const chunks = []
@@ -694,7 +920,7 @@ export function apply(ctx) {
   if (tools && typeof tools.register === 'function') {
     disposers.push(tools.register({
       name: 'kanban_create_task',
-      description: '在 DSH 看板中创建一张任务卡片。board 省略时使用第一个看板；status 可选 triage/todo/scheduled/ready/blocked/review/done/archived（默认 todo）；priority 为 0-9 整数，越大越优先（默认 0）；assignee 为子Agent模型名，留空表示跟随会话默认模型；scheduled_at 为 ISO 时间字符串（如 2026-08-15T10:00），仅 status=scheduled 时生效。',
+      description: '在 DSH 看板中创建一张任务卡片。board 省略时使用第一个看板；status 可选 triage/todo/scheduled/ready/blocked/review/done/archived（默认 todo）；priority 为 0-9 整数，越大越优先（默认 0）；assignee 为子Agent模型名，留空表示跟随会话默认模型；schedule 为定时设置（仅 status=scheduled 时生效）：kind=interval 每 N 分钟间隔重复（需 intervalMinutes）、kind=daily 每天固定时刻（需 dailyTime，HH:MM）、可选 parentId 等待同看板父卡片完成/归档后激活。',
       parameters: {
         type: 'object',
         properties: {
@@ -704,7 +930,17 @@ export function apply(ctx) {
           status: { type: 'string', enum: ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'review', 'done', 'archived'], description: '初始列，默认 todo。' },
           priority: { type: 'number', description: '优先级 0-9，越大越优先，默认 0。' },
           assignee: { type: 'string', description: '子Agent模型名（可选，留空跟随会话默认模型）。' },
-          scheduled_at: { type: 'string', description: '定时执行时间 ISO 字符串（可选，仅 status=scheduled 时生效）。' },
+          schedule: {
+            type: 'object',
+            description: '定时设置（可选，仅 status=scheduled 时生效）。kind 必填；parentId 可选。',
+            properties: {
+              kind: { type: 'string', enum: ['interval', 'daily'], description: '定时方式：interval=间隔重复 / daily=每天固定时刻。' },
+              intervalMinutes: { type: 'number', description: 'kind=interval 时：间隔分钟（1-10080，最长 7 天）。' },
+              dailyTime: { type: 'string', description: 'kind=daily 时：每天时刻 HH:MM（如 09:00）。' },
+              parentId: { type: 'string', description: '可选：同看板父卡片 id，父卡片完成/归档时激活。' },
+            },
+            required: ['kind'],
+          },
         },
         required: ['title'],
       },
@@ -726,9 +962,14 @@ export function apply(ctx) {
           assignee: args.assignee,
           priority: args.priority,
           status: args.status,
-          scheduled_at: args.scheduled_at,
+          schedule: args.schedule,
         })
-        return '已创建看板任务：' + task.title + '（id=' + task.id + '，看板=' + slug + '，初始列=' + task.status + (task.scheduled_at ? '，定时=' + fmtTime(task.scheduled_at) : '') + '）'
+        const schedText = task.schedule && task.schedule.kind === 'interval'
+          ? '每' + task.schedule.intervalMinutes + ' 分钟重复'
+          : task.schedule && task.schedule.kind === 'daily'
+            ? '每天 ' + String(Math.floor(task.schedule.dailyMinutes / 60)).padStart(2, '0') + ':' + String(task.schedule.dailyMinutes % 60).padStart(2, '0')
+            : task.schedule && task.schedule.parentId ? '等待父卡片完成' : ''
+        return '已创建看板任务：' + task.title + '（id=' + task.id + '，看板=' + slug + '，初始列=' + task.status + (schedText ? '，定时=' + schedText : '') + '）'
       },
     }))
 
@@ -762,7 +1003,7 @@ export function apply(ctx) {
     }))
   }
 
-  // —— 事件循环：定时列提升 + 运行心跳 + 实时进度 ——
+  // —— 事件循环：运行心跳 + 实时进度（定时激活由每任务的 ctx.timeout + 父完成钩子驱动，不在此循环）——
   let ticking = false
   async function tick() {
     if (ticking) return
@@ -774,9 +1015,7 @@ export function apply(ctx) {
       const runningSnapshots = []
       for (const board of s.boards) {
         for (const task of board.tasks) {
-          if (task.status === 'scheduled' && typeof task.scheduled_at === 'number' && task.scheduled_at <= now()) {
-            pending.push({ slug: board.slug, id: task.id, kind: 'promote' })
-          } else if (task.status === 'running' && task.run && runs.has(KEY(board.slug, task.id))) {
+          if (task.status === 'running' && task.run && runs.has(KEY(board.slug, task.id))) {
             const base = typeof task.run.heartbeat_at === 'number' ? task.run.heartbeat_at : (typeof task.run.started_at === 'number' ? task.run.started_at : 0)
             if (base > 0 && base < deadline) {
               pending.push({ slug: board.slug, id: task.id, kind: 'heartbeat-dead' })
@@ -805,13 +1044,7 @@ export function apply(ctx) {
           const board = findBoard(p.slug)
           const task = board && findTask(board, p.id)
           if (!task) continue
-          if (p.kind === 'promote') {
-            if (task.status !== 'scheduled') continue
-            task.status = 'ready'
-            task.scheduled_at = null
-            task.updated_at = now()
-            pushEvent(task, 'moved', { from: 'scheduled', to: 'ready', by: 'timer' })
-          } else if (p.kind === 'heartbeat-dead') {
+          if (p.kind === 'heartbeat-dead') {
             if (task.status !== 'running') continue
             abortRun(p.slug, p.id)
             const reason = '心跳丢失：子代理超过 ' + Math.round(HEARTBEAT_TIMEOUT_MS / 60000) + ' 分钟无活动'
@@ -837,11 +1070,21 @@ export function apply(ctx) {
     }
   }
   disposers.push(ctx.interval(tick, LOOP_TICK_MS))
+  load().then(() => syncTimers()).catch(() => {})
 
-  // 子会话日志活动 → 心跳（本地 provider 的 session/event 在本进程发射）
+  // 会话日志活动 → 记录最近活跃根 + 子运行心跳（本地 provider 的 session/event 在本进程发射）
   disposers.push(ctx.on('session/event', (session) => {
-    if (store === null || !session) return
+    if (!session) return
     const sid = String(session.id)
+    if (agents && typeof agents.roots === 'function') {
+      for (const r of agents.roots()) {
+        if (String(r.id) === sid || (r.session && String(r.session.id) === sid)) {
+          lastActiveRootId = String(r.id)
+          break
+        }
+      }
+    }
+    if (store === null) return
     for (const entry of runs.values()) {
       if (!entry.run || String(entry.run.id) !== sid) continue
       const board = findBoard(entry.slug)
@@ -877,7 +1120,8 @@ export function apply(ctx) {
         }
       }
       if (touched) {
-        storeTarget().then(target => ctx.fs.writeText(target, JSON.stringify(store), undefined, undefined, resolvePolicy())).catch(() => {})
+        // 返回落盘 Promise：宿主 dispose 若等待清理回调，可保证最终状态写入
+        return storeTarget().then(target => ctx.fs.writeText(target, JSON.stringify(store), undefined, undefined, resolvePolicy())).catch(() => {})
       }
     }
   })
