@@ -107,6 +107,12 @@ window.__ModuleLoader__.load({
         '.kbn-modal-title { font-weight:600; font-size:16px; }',
         '.kbn-modal-actions { display:flex; justify-content:flex-end; gap:8px; }',
         '.kbn-empty { padding:40px; text-align:center; color:var(--dsw-alias-label-secondary); }',
+        '.kbn-overlay { position:fixed; top:12px; right:12px; display:flex; flex-direction:column; align-items:flex-end; gap:8px; pointer-events:none; z-index:1000; }',
+        '.kbn-capsule { background:var(--dsw-alias-bg-overlay); border:1px solid var(--dsw-alias-border-l2); border-radius:12px; padding:3px 10px; font-size:11.5px; color:var(--dsw-alias-label-secondary); box-shadow:0 2px 10px rgba(0,0,0,.18); }',
+        '.kbn-toast { pointer-events:auto; background:var(--dsw-alias-bg-overlay); border:1px solid var(--dsw-alias-border-l2); border-left:3px solid #34d399; border-radius:8px; padding:7px 12px; min-width:200px; max-width:340px; box-shadow:0 4px 16px rgba(0,0,0,.25); }',
+        '.kbn-toast-bad { border-left-color:#f87171; }',
+        '.kbn-toast-title { font-size:12.5px; font-weight:600; color:var(--dsw-alias-label-primary); }',
+        '.kbn-toast-detail { font-size:11.5px; color:var(--dsw-alias-label-secondary); margin-top:3px; }',
       ].join('\n')
 
       const STATUSES = [
@@ -851,11 +857,84 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'kbn-view' }, h(BoardContent))
       }
 
+      // —— 帧级浮层：任务结算文字 toast + 运行中状态胶囊（纯文字提示，5s 轮询 getStore 快照 diff）——
+      function KanbanOverlay() {
+        const [toasts, setToasts] = React.useState([])
+        const [runningCount, setRunningCount] = React.useState(0)
+        const seenRef = React.useRef(null)
+        const runningRef = React.useRef(0)
+
+        React.useEffect(() => {
+          let alive = true
+          let seq = 0
+          function scan() {
+            call('getStore').then(data => {
+              if (!alive) return
+              const boards = (data && data.boards) || []
+              const nextSeen = seenRef.current || {}
+              const newToasts = []
+              let running = 0
+              for (const b of boards) {
+                for (const t of b.tasks || []) {
+                  const run = t.run
+                  const prev = nextSeen[t.id]
+                  if (t.status === 'running' && run) running++
+                  if (run && run.outcome && (!prev || prev.outcome !== run.outcome)) {
+                    if (run.outcome === 'done') {
+                      newToasts.push({ key: 't' + (++seq), tone: 'ok', title: '看板任务「' + cap(t.title, 30) + '」已完成', detail: '' })
+                    } else if (run.outcome === 'error') {
+                      newToasts.push({ key: 't' + (++seq), tone: 'bad', title: '看板任务「' + cap(t.title, 30) + '」已阻塞', detail: run.error ? String(run.error) : '' })
+                    }
+                  }
+                  nextSeen[t.id] = { outcome: run && run.outcome ? run.outcome : null }
+                }
+              }
+              if (seenRef.current === null) {
+                // 首轮只做基线，不回放历史结算（刷新页面不刷旧 toast）
+                seenRef.current = nextSeen
+              } else {
+                seenRef.current = nextSeen
+                if (newToasts.length > 0) {
+                  setToasts(prev => [...prev, ...newToasts])
+                  for (const t of newToasts) {
+                    setTimeout(() => {
+                      if (!alive) return
+                      setToasts(prev => prev.filter(x => x.key !== t.key))
+                    }, 6000)
+                  }
+                }
+              }
+              if (running !== runningRef.current) {
+                runningRef.current = running
+                setRunningCount(running)
+              }
+            }).catch(() => {
+              // 轮询失败静默：下个周期重试
+            })
+          }
+          scan()
+          return ctx.interval(scan, 5000)
+        }, [])
+
+        if (toasts.length === 0 && runningCount === 0) return null
+        return h('div', { className: 'kbn-overlay' },
+          runningCount > 0 ? h('div', { className: 'kbn-capsule' }, '● 看板运行中 ' + runningCount) : null,
+          toasts.map(t => h('div', { key: t.key, className: 'kbn-toast' + (t.tone === 'bad' ? ' kbn-toast-bad' : '') },
+            h('div', { className: 'kbn-toast-title' }, t.title),
+            t.detail ? h('div', { className: 'kbn-toast-detail' }, cap(t.detail, 120)) : null,
+          )),
+        )
+      }
+
       const disposers = []
       disposers.push(insertCss(CSS))
       slots.inject('conversation.view', () => slots.register(
         { name: 'conversation.view', id: 'kanban', order: 20, label: () => '看板' },
         () => h(KanbanView),
+      ))
+      slots.inject('shell.overlay', () => slots.register(
+        { name: 'shell.overlay', id: 'kanban-status', order: 0 },
+        () => h(KanbanOverlay),
       ))
       ctx.effect(() => () => {
         disposers.forEach(d => { try { d() } catch (err) {} })

@@ -5,7 +5,9 @@
 // 硬依赖：声明后本插件会等到这些服务全部就绪才 apply（并在服务后到齐时自动重载）。
 // 若只靠 apply 内 ctx.get()，启动早期服务提供方 fiber 尚未激活时 ctx.get 会返回
 // undefined（strict 检查 fiber.state===2），导致 webServer 路由被静默跳过、页面永远「加载中」。
-export const inject = ['fs', 'timer', 'webServer', 'tools', 'subagents', 'agents', 'sandboxPolicy']
+import { KANBAN_SKILL } from './skill.js'
+
+export const inject = ['fs', 'timer', 'webServer', 'tools', 'subagents', 'agents', 'sandboxPolicy', 'skills']
 
 export function apply(ctx) {
   const sandboxPolicy = ctx.get('sandboxPolicy')
@@ -13,6 +15,7 @@ export function apply(ctx) {
   const agents = ctx.get('agents')
 
   const STATUSES = ['triage', 'todo', 'scheduled', 'ready', 'running', 'blocked', 'review', 'done', 'archived']
+  const STATUS_LABEL = { triage: '待细化', todo: '待办', scheduled: '定时', ready: '就绪', running: '运行中', blocked: '阻塞', review: '审核', done: '完成', archived: '归档' }
 
   // 事件循环与心跳常量
   const LOOP_TICK_MS = 10000                       // 循环步长
@@ -420,7 +423,7 @@ export function apply(ctx) {
     } catch (err) {}
   }
 
-  function buildPrompt(task) {
+  function buildPrompt(task, extra) {
     const lines = []
     lines.push('你被派发执行一个看板任务（DeepSeek Harness kanban dispatch）。')
     lines.push('')
@@ -429,6 +432,11 @@ export function apply(ctx) {
       lines.push('')
       lines.push('【任务描述】')
       lines.push(task.body)
+    }
+    if (extra) {
+      lines.push('')
+      lines.push('【补充要求】')
+      lines.push(extra)
     }
     lines.push('')
     lines.push('【进度汇报】')
@@ -450,6 +458,9 @@ export function apply(ctx) {
       if (task.run.summary) lines.push('摘要：' + task.run.summary)
       if (task.run.error) lines.push('错误：' + task.run.error)
     }
+    lines.push('')
+    lines.push('【看板协作】')
+    lines.push('若你的会话中提供看板工具（kanban_add_comment 等），可以用它们向本任务追加评论（供看板界面的人阅读），但不要用任何工具修改本任务的状态或字段：任务状态由看板的结算逻辑自动管理。')
     lines.push('')
     lines.push('【完成要求】')
     lines.push('请在当前工作区中完成该任务。完成后，用一段简短的总结说明你做了什么、结果如何、以及遗留事项（如有）。这段总结将作为任务的完成摘要写回看板。')
@@ -562,17 +573,17 @@ export function apply(ctx) {
     return { models }
   })
 
-  route('createBoard', async (a) => {
+  function createBoardInner(a) {
     const slug = normSlug(a.slug) || slugify(a.name)
     if (!slug) throw new Error('看板 slug 无效')
     const name = cap(String(a.name || slug), 80)
-    return mutate(() => {
-      if (findBoard(slug)) throw new Error('同名看板已存在')
-      const board = { slug, name, created_at: now(), tasks: [] }
-      store.boards.push(board)
-      return board
-    })
-  })
+    if (findBoard(slug)) throw new Error('同名看板已存在')
+    const board = { slug, name, created_at: now(), tasks: [] }
+    store.boards.push(board)
+    return board
+  }
+
+  route('createBoard', async (a) => mutate(() => createBoardInner(a)))
 
   route('deleteBoard', async (a) => {
     const slug = String(a.slug || '')
@@ -610,42 +621,71 @@ export function apply(ctx) {
 
   route('createTask', createTaskOp)
 
+  function patchTaskInner(slug, id, patch) {
+    const board = findBoard(slug)
+    const task = board && findTask(board, id)
+    if (!task) throw new Error('任务不存在')
+    const changes = []
+    if ('title' in patch) {
+      const v = cap(String(patch.title || '').trim(), 500)
+      if (!v) throw new Error('标题不能为空')
+      task.title = v
+      changes.push('title')
+    }
+    if ('body' in patch) {
+      task.body = cap(String(patch.body || ''), 20000)
+      changes.push('body')
+    }
+    if ('assignee' in patch) {
+      task.assignee = cap(String(patch.assignee || ''), 200) || null
+      changes.push('assignee')
+    }
+    if ('priority' in patch) {
+      task.priority = clampInt(patch.priority, 0, 9)
+      changes.push('priority')
+    }
+    if ('schedule' in patch) {
+      task.schedule = normalizeSchedule(patch.schedule, board, task.id, task.schedule)
+      changes.push('schedule')
+    }
+    if (changes.length === 0) return task
+    task.updated_at = now()
+    pushEvent(task, 'edited', { fields: changes })
+    if (task.status === 'scheduled' && changes.indexOf('schedule') >= 0) tryActivate(slug, task) // 新设的父已完成等条件已满足时立即激活
+    return task
+  }
+
   route('patchTask', async (a) => {
-    return mutate(() => {
-      const board = findBoard(String(a.slug || ''))
-      const task = board && findTask(board, String(a.id || ''))
-      if (!task) throw new Error('任务不存在')
-      const patch = (a.patch && typeof a.patch === 'object') ? a.patch : {}
-      const changes = []
-      if ('title' in patch) {
-        const v = cap(String(patch.title || '').trim(), 500)
-        if (!v) throw new Error('标题不能为空')
-        task.title = v
-        changes.push('title')
-      }
-      if ('body' in patch) {
-        task.body = cap(String(patch.body || ''), 20000)
-        changes.push('body')
-      }
-      if ('assignee' in patch) {
-        task.assignee = cap(String(patch.assignee || ''), 200) || null
-        changes.push('assignee')
-      }
-      if ('priority' in patch) {
-        task.priority = clampInt(patch.priority, 0, 9)
-        changes.push('priority')
-      }
-      if ('schedule' in patch) {
-        task.schedule = normalizeSchedule(patch.schedule, board, task.id, task.schedule)
-        changes.push('schedule')
-      }
-      if (changes.length === 0) return task
-      task.updated_at = now()
-      pushEvent(task, 'edited', { fields: changes })
-      if (task.status === 'scheduled' && changes.indexOf('schedule') >= 0) tryActivate(String(a.slug || ''), task) // 新设的父已完成等条件已满足时立即激活
-      return task
-    })
+    const slug = String(a.slug || '')
+    const id = String(a.id || '')
+    const patch = (a.patch && typeof a.patch === 'object') ? a.patch : {}
+    return mutate(() => patchTaskInner(slug, id, patch))
   })
+
+  function moveTaskInner(slug, id, status, by) {
+    const board = findBoard(slug)
+    const task = board && findTask(board, id)
+    if (!task) throw new Error('任务不存在')
+    if (task.status === status) return task
+    if (task.status === 'running') {
+      abortRun(slug, id)
+      if (task.run) { task.run.ended_at = now(); task.run.outcome = 'terminated' }
+      pushEvent(task, 'terminated', { by })
+    }
+    const from = task.status
+    task.status = status
+    task.updated_at = now()
+    pushEvent(task, 'moved', { from, to: status, by })
+    if (status === 'scheduled' && task.schedule && task.schedule.kind && typeof task.schedule.nextAt !== 'number') {
+      task.schedule.nextAt = scheduleNextAt(task.schedule)
+    }
+    if (from === 'scheduled' && status !== 'ready' && status !== 'scheduled' && task.schedule) {
+      task.schedule = null
+      pushEvent(task, 'edited', { fields: ['schedule'] })
+    }
+    if (status === 'done' || status === 'archived') activateChildren(slug, task)
+    return task
+  }
 
   route('moveTask', async (a) => {
     const status = String(a.status || '')
@@ -653,30 +693,7 @@ export function apply(ctx) {
     if (status === 'running') throw new Error('running 列只能通过派发进入')
     const slug = String(a.slug || '')
     const id = String(a.id || '')
-    return mutate(() => {
-      const board = findBoard(slug)
-      const task = board && findTask(board, id)
-      if (!task) throw new Error('任务不存在')
-      if (task.status === status) return task
-      if (task.status === 'running') {
-        abortRun(slug, id)
-        if (task.run) { task.run.ended_at = now(); task.run.outcome = 'terminated' }
-        pushEvent(task, 'terminated', {})
-      }
-      const from = task.status
-      task.status = status
-      task.updated_at = now()
-      pushEvent(task, 'moved', { from, to: status, by: 'manual' })
-      if (status === 'scheduled' && task.schedule && task.schedule.kind && typeof task.schedule.nextAt !== 'number') {
-        task.schedule.nextAt = scheduleNextAt(task.schedule)
-      }
-      if (from === 'scheduled' && status !== 'ready' && status !== 'scheduled' && task.schedule) {
-        task.schedule = null
-        pushEvent(task, 'edited', { fields: ['schedule'] })
-      }
-      if (status === 'done' || status === 'archived') activateChildren(slug, task)
-      return task
-    })
+    return mutate(() => moveTaskInner(slug, id, status, 'manual'))
   })
 
   route('bulkMove', async (a) => {
@@ -693,24 +710,7 @@ export function apply(ctx) {
         try {
           const task = findTask(board, id)
           if (!task) { results.push({ id, ok: false, error: '任务不存在' }); continue }
-          if (task.status === status) { results.push({ id, ok: true }); continue }
-          if (task.status === 'running') {
-            abortRun(slug, id)
-            if (task.run) { task.run.ended_at = now(); task.run.outcome = 'terminated' }
-            pushEvent(task, 'terminated', {})
-          }
-          const from = task.status
-          task.status = status
-          task.updated_at = now()
-          pushEvent(task, 'moved', { from, to: status, by: 'bulk' })
-          if (status === 'scheduled' && task.schedule && task.schedule.kind && typeof task.schedule.nextAt !== 'number') {
-            task.schedule.nextAt = scheduleNextAt(task.schedule)
-          }
-          if (from === 'scheduled' && status !== 'ready' && status !== 'scheduled' && task.schedule) {
-            task.schedule = null
-            pushEvent(task, 'edited', { fields: ['schedule'] })
-          }
-          if (status === 'done' || status === 'archived') activateChildren(slug, task)
+          moveTaskInner(slug, id, status, 'bulk')
           results.push({ id, ok: true })
         } catch (err) {
           results.push({ id, ok: false, error: String((err && err.message) || err) })
@@ -740,43 +740,51 @@ export function apply(ctx) {
     })
   })
 
+  function deleteTaskInner(slug, id) {
+    const board = findBoard(slug)
+    if (!board) throw new Error('看板不存在')
+    const idx = board.tasks.findIndex(t => t.id === id)
+    if (idx < 0) throw new Error('任务不存在')
+    abortRun(slug, id)
+    const removed = board.tasks[idx]
+    board.tasks.splice(idx, 1)
+    activateChildren(slug, removed) // 父被删除视为已完成，释放等待它的子任务
+    return removed
+  }
+
   route('deleteTask', async (a) => {
     const slug = String(a.slug || '')
     const id = String(a.id || '')
     return mutate(() => {
-      const board = findBoard(slug)
-      if (!board) throw new Error('看板不存在')
-      const idx = board.tasks.findIndex(t => t.id === id)
-      if (idx < 0) throw new Error('任务不存在')
-      abortRun(slug, id)
-      const removed = board.tasks[idx]
-      board.tasks.splice(idx, 1)
-      activateChildren(slug, removed) // 父被删除视为已完成，释放等待它的子任务
+      deleteTaskInner(slug, id)
       return { ok: true }
     })
   })
+
+  function addCommentInner(slug, id, body, author) {
+    const board = findBoard(slug)
+    const task = board && findTask(board, id)
+    if (!task) throw new Error('任务不存在')
+    if (!Array.isArray(task.comments)) task.comments = []
+    const comment = { id: makeId('c'), author: author === 'agent' ? 'agent' : 'user', body, created_at: now() }
+    task.comments.push(comment)
+    task.updated_at = now()
+    pushEvent(task, 'commented', { commentId: comment.id, author: comment.author })
+    return { comment, task }
+  }
 
   route('addComment', async (a) => {
     const body = cap(String(a.body || '').trim(), 4000)
     if (!body) throw new Error('评论不能为空')
     const slug = String(a.slug || '')
     const id = String(a.id || '')
-    return mutate(() => {
-      const board = findBoard(slug)
-      const task = board && findTask(board, id)
-      if (!task) throw new Error('任务不存在')
-      if (!Array.isArray(task.comments)) task.comments = []
-      const comment = { id: makeId('c'), author: 'user', body, created_at: now() }
-      task.comments.push(comment)
-      task.updated_at = now()
-      pushEvent(task, 'commented', { commentId: comment.id })
-      return { comment, task }
-    })
+    return mutate(() => addCommentInner(slug, id, body, 'user'))
   })
 
   async function dispatchOp(a) {
     const slug = String(a.slug || '')
     const id = String(a.id || '')
+    const extra = cap(String(a.instructions || '').trim(), 2000) || null
     return mutate(async () => {
       const board = findBoard(slug)
       const task = board && findTask(board, id)
@@ -807,7 +815,7 @@ export function apply(ctx) {
       const signal = makeSignal()
       const startRequest = {
         label: 'kanban: ' + cap(task.title, 60),
-        prompt: [{ type: 'text', text: buildPrompt(task) }],
+        prompt: [{ type: 'text', text: buildPrompt(task, extra) }],
         parent,
         signal,
       }
@@ -851,19 +859,24 @@ export function apply(ctx) {
 
   route('dispatch', dispatchOp)
 
+  function terminateInner(slug, id, by) {
+    const board = findBoard(slug)
+    const task = board && findTask(board, id)
+    if (!task) throw new Error('任务不存在')
+    if (task.status !== 'running') throw new Error('任务未在运行')
+    abortRun(slug, id)
+    if (task.run) { task.run.ended_at = now(); task.run.outcome = 'terminated' }
+    task.status = 'ready'
+    task.updated_at = now()
+    pushEvent(task, 'terminated', { by })
+    return task
+  }
+
   route('terminate', async (a) => {
     const slug = String(a.slug || '')
     const id = String(a.id || '')
     return mutate(() => {
-      const board = findBoard(slug)
-      const task = board && findTask(board, id)
-      if (!task) throw new Error('任务不存在')
-      if (task.status !== 'running') throw new Error('任务未在运行')
-      abortRun(slug, id)
-      if (task.run) { task.run.ended_at = now(); task.run.outcome = 'terminated' }
-      task.status = 'ready'
-      task.updated_at = now()
-      pushEvent(task, 'terminated', {})
+      const task = terminateInner(slug, id, 'manual')
       return { ok: true, task }
     })
   })
@@ -915,12 +928,185 @@ export function apply(ctx) {
     }))
   }
 
-  // —— Agent 工具：主 Agent 在对话中直接创建看板任务 ——
-  const tools = ctx.get('tools')
-  if (tools && typeof tools.register === 'function') {
-    disposers.push(tools.register({
+  // —— Skill 引导：注册进宿主 skills 注册表（全局层，所有会话的 skill 目录可见）——
+  const skills = ctx.get('skills')
+  if (skills && typeof skills.register === 'function') {
+    disposers.push(skills.register({
+      name: KANBAN_SKILL.name,
+      description: KANBAN_SKILL.description,
+      whenToUse: KANBAN_SKILL.whenToUse,
+      source: 'custom',
+      content: KANBAN_SKILL.content,
+    }))
+  } else {
+    console.warn('[kanban] skills 服务不可用：跳过 kanban skill 注册（工具面不受影响）')
+  }
+
+  // —— Agent 工具：10 个看板工具（读得见、改得动、派得出去、收得回结果）——
+  // 共享 helper：解析看板（省略时用第一个）、定位任务（省略 board 时全看板搜索）
+  async function resolveBoardSlug(args) {
+    await load()
+    let slug = typeof args.board === 'string' ? args.board.trim() : ''
+    if (!slug) {
+      if (store.boards.length === 0) throw new Error('还没有任何看板：可用 kanban_create_board 创建，或在页面创建看板')
+      slug = store.boards[0].slug
+    }
+    return slug
+  }
+  function locateTask(args, id) {
+    const slugArg = typeof args.board === 'string' ? args.board.trim() : ''
+    if (slugArg) {
+      const board = findBoard(slugArg)
+      if (!board) throw new Error('看板不存在: ' + slugArg)
+      const task = findTask(board, id)
+      if (!task) throw new Error('任务不存在: ' + id + '（看板 ' + slugArg + '）')
+      return { slug: slugArg, task }
+    }
+    for (const board of store.boards) {
+      const task = findTask(board, id)
+      if (task) return { slug: board.slug, task }
+    }
+    throw new Error('任务不存在: ' + id + '（已搜索全部看板；可用 board 指定看板）')
+  }
+  const reqId = (args) => {
+    const id = String(args && args.id ? args.id : '').trim()
+    if (!id) throw new Error('任务 id 不能为空')
+    return id
+  }
+  const shortId = (id) => String(id || '').replace(/^t_/, '').slice(0, 8)
+  const textResultView = (title, value) => ({ card: 'generic', title, content: [{ type: 'text', text: String(value) }] })
+  const BOARD_PARAM = { type: 'string', description: '看板 slug（可选，省略时使用第一个看板）。' }
+  const NO_BOARD_BOARD_PARAM = { type: 'string', description: '看板 slug（可选，省略时在所有看板中查找任务 id）。' }
+  const ID_PARAM = { type: 'string', description: '任务 id（必填）。' }
+  const scheduleText = (t) => {
+    const s = t.schedule
+    if (!s) return ''
+    const parts = []
+    if (s.kind === 'interval') parts.push('每' + s.intervalMinutes + ' 分钟重复')
+    if (s.kind === 'daily') parts.push('每天 ' + String(Math.floor(s.dailyMinutes / 60)).padStart(2, '0') + ':' + String(s.dailyMinutes % 60).padStart(2, '0'))
+    if (s.parentId) parts.push('等待父卡片 ' + shortId(s.parentId) + ' 完成后激活')
+    return parts.join('，') || '仅停放'
+  }
+
+  const KANBAN_TOOLS = [
+    {
+      name: 'kanban_list_boards',
+      description: '列出 DSH 看板中的全部看板及其负载：slug、名称、各列任务数与运行中任务数。用于选择看板或了解全局状态。',
+      parameters: { type: 'object', properties: {}, required: [] },
+      async execute() {
+        await load()
+        if (store.boards.length === 0) throw new Error('还没有任何看板：可用 kanban_create_board 创建，或在页面创建看板')
+        const lines = store.boards.map(b => {
+          const c = {}
+          for (const s of STATUSES) c[s] = 0
+          for (const t of b.tasks) if (typeof c[t.status] === 'number') c[t.status]++
+          return '- ' + b.name + '（slug=' + b.slug + '）：待办 ' + c.todo + ' / 定时 ' + c.scheduled + ' / 就绪 ' + c.ready + ' / 运行中 ' + c.running + ' / 阻塞 ' + c.blocked + ' / 完成 ' + c.done + '，共 ' + b.tasks.length + ' 张卡'
+        })
+        return '看板列表（' + store.boards.length + ' 个）：\n' + lines.join('\n')
+      },
+      presentCall: () => ({ card: 'generic', title: '看板：列出所有看板' }),
+      presentResult: (_a, value) => textResultView('看板：看板列表', value),
+    },
+    {
+      name: 'kanban_list_tasks',
+      description: '列出看板任务（紧凑视图，先看板再动手）。可选过滤：status（triage/todo/scheduled/ready/running/blocked/review/done/archived）、priority_min（仅返回优先级 >= 该值）、assignee（负责人/子Agent模型名）、query（标题/正文/ID 关键词）、limit（默认 50，上限 200）。按优先级降序、同优先级新卡在前。board 省略时使用第一个看板。',
+      parameters: {
+        type: 'object',
+        properties: {
+          board: BOARD_PARAM,
+          status: { type: 'string', enum: STATUSES, description: '仅列该状态的任务（可选）。' },
+          priority_min: { type: 'number', description: '仅列优先级 >= 该值的任务（可选，0-9）。' },
+          assignee: { type: 'string', description: '仅列该负责人（子Agent模型名）的任务（可选）。' },
+          query: { type: 'string', description: '标题/正文/ID 关键词（可选，不区分大小写）。' },
+          limit: { type: 'number', description: '最多返回条数（默认 50，上限 200）。' },
+        },
+        required: [],
+      },
+      async execute(args) {
+        const slug = await resolveBoardSlug(args)
+        const board = findBoard(slug)
+        if (!board) throw new Error('看板不存在: ' + slug)
+        const minP = args.priority_min === undefined || args.priority_min === null ? null : clampInt(args.priority_min, 0, 9)
+        const q = String(args.query || '').trim().toLowerCase()
+        const limit = args.limit === undefined || args.limit === null ? 50 : clampInt(args.limit, 1, 200)
+        let list = board.tasks.slice()
+        if (typeof args.status === 'string' && args.status) list = list.filter(t => t.status === args.status)
+        if (minP !== null) list = list.filter(t => t.priority >= minP)
+        if (typeof args.assignee === 'string' && args.assignee.trim()) {
+          const want = args.assignee.trim()
+          list = list.filter(t => (t.assignee || '') === want)
+        }
+        if (q) list = list.filter(t => ((t.title || '') + ' ' + (t.body || '') + ' ' + t.id).toLowerCase().indexOf(q) >= 0)
+        list.sort((x, y) => (y.priority - x.priority) || (y.created_at - x.created_at))
+        const total = list.length
+        if (total === 0) return '看板 ' + board.name + '（' + slug + '）：当前无符合条件的任务。'
+        const page = list.slice(0, limit)
+        const lines = page.map(t => {
+          const parts = ['id=' + t.id, '状态=' + STATUS_LABEL[t.status], '优先级=' + t.priority]
+          if (t.assignee) parts.push('负责人=' + t.assignee)
+          if (t.status === 'scheduled' && t.schedule) parts.push('定时=' + scheduleText(t))
+          if (t.status === 'running' && t.run) parts.push('运行中')
+          return '- ' + cap(t.title, 60) + '（' + parts.join('，') + '）'
+        })
+        return '看板 ' + board.name + '（' + slug + '）任务：共 ' + total + ' 张' + (page.length < total ? '，仅列前 ' + page.length + ' 张（可用 query/limit 调整）' : '') + '：\n' + lines.join('\n')
+      },
+      presentCall: () => ({ card: 'generic', title: '看板：列出任务' }),
+      presentResult: (_a, value) => textResultView('看板：任务列表', value),
+    },
+    {
+      name: 'kanban_get_task',
+      description: '查看单个看板任务的完整信息：标题/正文/状态/优先级/负责人/定时设置/最近评论(最多20条)/最近事件(最多20条)/最近一次运行（结果、摘要、错误、进度最后50行）。board 省略时在所有看板中查找任务 id。',
+      parameters: { type: 'object', properties: { id: ID_PARAM, board: NO_BOARD_BOARD_PARAM }, required: ['id'] },
+      async execute(args) {
+        await load()
+        const id = reqId(args)
+        const located = locateTask(args, id)
+        const slug = located.slug
+        const task = located.task
+        const lines = []
+        lines.push('看板任务 ' + id + '（看板：' + slug + '）')
+        lines.push('标题：' + task.title)
+        lines.push('状态：' + STATUS_LABEL[task.status] + '（' + task.status + '）')
+        lines.push('优先级：' + task.priority)
+        lines.push('负责人：' + (task.assignee || '默认模型（跟随会话）'))
+        lines.push('定时：' + (scheduleText(task) || '无'))
+        lines.push('')
+        lines.push('正文：' + (task.body || '（无）'))
+        const comments = (task.comments || []).slice(-20)
+        lines.push('')
+        lines.push('最近评论（' + comments.length + ' 条）：')
+        if (comments.length === 0) lines.push('- （无）')
+        for (const c of comments) lines.push('- ' + (c.author === 'agent' ? '主Agent' : 'user') + ' ' + fmtTime(c.created_at) + '：' + cap(c.body, 200))
+        const events = (task.events || []).slice(-20)
+        lines.push('')
+        lines.push('最近事件（' + events.length + ' 条）：')
+        if (events.length === 0) lines.push('- （无）')
+        for (const ev of events) lines.push('- ' + fmtTime(ev.created_at) + ' ' + ev.kind + '：' + cap(JSON.stringify(ev.payload || {}), 120))
+        const run = task.run
+        lines.push('')
+        if (run) {
+          lines.push('最近运行：')
+          lines.push('- 结果：' + (run.outcome || (task.status === 'running' ? '运行中' : '（未结算）')))
+          lines.push('- 开始：' + fmtTime(run.started_at) + '；结束：' + (run.ended_at ? fmtTime(run.ended_at) : '（未结束）'))
+          if (run.runId) lines.push('- runId：' + run.runId)
+          if (run.summary) lines.push('- 摘要：' + run.summary)
+          if (run.error) lines.push('- 错误：' + run.error)
+          const progress = (run.progress || []).filter(p => String(p).trim() !== '').slice(-50)
+          if (progress.length > 0) {
+            lines.push('- 进度（最后 ' + progress.length + ' 行）：')
+            for (const p of progress) lines.push('  ' + p)
+          }
+        } else {
+          lines.push('最近运行：无（尚未派发过）')
+        }
+        return lines.join('\n')
+      },
+      presentCall: () => ({ card: 'generic', title: '看板：查看任务详情' }),
+      presentResult: (_a, value) => textResultView('看板：任务详情', value),
+    },
+    {
       name: 'kanban_create_task',
-      description: '在 DSH 看板中创建一张任务卡片。board 省略时使用第一个看板；status 可选 triage/todo/scheduled/ready/blocked/review/done/archived（默认 todo）；priority 为 0-9 整数，越大越优先（默认 0）；assignee 为子Agent模型名，留空表示跟随会话默认模型；schedule 为定时设置（仅 status=scheduled 时生效）：kind=interval 每 N 分钟间隔重复（需 intervalMinutes）、kind=daily 每天固定时刻（需 dailyTime，HH:MM）、可选 parentId 等待同看板父卡片完成/归档后激活。',
+      description: '在 DSH 看板中创建一张任务卡片——把工作拆进看板的入口，人会在界面「看板」标签页看到。board 省略时使用第一个看板；status 可选 triage/todo/scheduled/ready/blocked/review/done/archived（默认 todo，委派前需为 ready）；priority 为 0-9 整数，越大越优先（默认 0）；assignee 为子Agent模型名，留空表示跟随会话默认模型；schedule 为定时设置（仅 status=scheduled 时生效）：kind=interval 每 N 分钟间隔重复（需 intervalMinutes）、kind=daily 每天固定时刻（需 dailyTime，HH:MM）、可选 parentId 等待同看板父卡片完成/归档后激活。',
       parameters: {
         type: 'object',
         properties: {
@@ -944,17 +1130,8 @@ export function apply(ctx) {
         },
         required: ['title'],
       },
-      output: {
-        schema: { type: 'string' },
-        render(_args, value) { return [{ type: 'text', text: String(value) }] },
-      },
       async execute(args) {
-        await load()
-        let slug = typeof args.board === 'string' ? args.board.trim() : ''
-        if (!slug) {
-          if (store.boards.length === 0) throw new Error('还没有任何看板：请先在页面创建看板')
-          slug = store.boards[0].slug
-        }
+        const slug = await resolveBoardSlug(args)
         const task = await createTaskOp({
           slug,
           title: args.title,
@@ -964,43 +1141,200 @@ export function apply(ctx) {
           status: args.status,
           schedule: args.schedule,
         })
-        const schedText = task.schedule && task.schedule.kind === 'interval'
-          ? '每' + task.schedule.intervalMinutes + ' 分钟重复'
-          : task.schedule && task.schedule.kind === 'daily'
-            ? '每天 ' + String(Math.floor(task.schedule.dailyMinutes / 60)).padStart(2, '0') + ':' + String(task.schedule.dailyMinutes % 60).padStart(2, '0')
-            : task.schedule && task.schedule.parentId ? '等待父卡片完成' : ''
-        return '已创建看板任务：' + task.title + '（id=' + task.id + '，看板=' + slug + '，初始列=' + task.status + (schedText ? '，定时=' + schedText : '') + '）'
+        return '已创建看板任务：' + task.title + '（id=' + task.id + '，看板=' + slug + '，初始列=' + STATUS_LABEL[task.status] + (scheduleText(task) ? '，定时=' + scheduleText(task) : '') + '）'
       },
-    }))
-
-    // —— Agent 工具：主 Agent 派发「就绪」任务给子代理执行 ——
-    disposers.push(tools.register({
-      name: 'kanban_dispatch_task',
-      description: '将 DSH 看板中「就绪」列的任务派发给子代理执行。任务必须处于 ready 列；运行完成后自动转「完成」并回写摘要，失败或超时转「阻塞」。board 省略时使用第一个看板。',
+      presentCall(args) {
+        const t = String((args && args.title) || '').trim()
+        return { card: 'generic', title: '看板：创建任务「' + cap(t || '（无标题）', 40) + '」' }
+      },
+      presentResult: (_a, value) => textResultView('看板：已创建任务', value),
+    },
+    {
+      name: 'kanban_update_task',
+      description: '更新看板任务：改标题/正文/优先级/负责人(子Agent模型名)/定时设置(schedule)，或移动状态列(status)。status 移动遵循看板规则（拖离定时列会清除定时；移入 done/archived 会激活等待本卡完成的子任务）。running 任务不能直接改状态：先 kanban_stop_task 停回就绪再移动。board 省略时在所有看板中查找任务 id。patch 至少含一个字段。',
       parameters: {
         type: 'object',
         properties: {
-          id: { type: 'string', description: '任务 id（必填，创建任务时返回的 id，或看板卡片 id）。' },
-          board: { type: 'string', description: '看板 slug（可选，省略时使用第一个看板）。' },
+          id: ID_PARAM,
+          board: NO_BOARD_BOARD_PARAM,
+          patch: {
+            type: 'object',
+            description: '要修改的字段（至少一项）。',
+            properties: {
+              title: { type: 'string', description: '新标题（非空）。' },
+              body: { type: 'string', description: '新正文（空字符串清空）。' },
+              status: { type: 'string', enum: ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'review', 'done', 'archived'], description: '目标列。' },
+              priority: { type: 'number', description: '优先级 0-9。' },
+              assignee: { type: 'string', description: '子Agent模型名；空字符串清除。' },
+              schedule: { type: 'object', description: '定时设置（同 kanban_create_task 的 schedule；传 null 清除）。' },
+            },
+          },
         },
-        required: ['id'],
-      },
-      output: {
-        schema: { type: 'string' },
-        render(_args, value) { return [{ type: 'text', text: String(value) }] },
+        required: ['id', 'patch'],
       },
       async execute(args) {
         await load()
-        let slug = typeof args.board === 'string' ? args.board.trim() : ''
-        if (!slug) {
-          if (store.boards.length === 0) throw new Error('还没有任何看板：请先在页面创建看板')
-          slug = store.boards[0].slug
+        const id = reqId(args)
+        const patch = (args.patch && typeof args.patch === 'object') ? args.patch : {}
+        const fields = ['title', 'body', 'status', 'priority', 'assignee', 'schedule'].filter(k => k in patch && patch[k] !== undefined)
+        if (fields.length === 0) throw new Error('patch 至少需要 title/body/status/priority/assignee/schedule 中的一项')
+        if ('status' in patch) {
+          if (patch.status !== null && patch.status !== undefined && STATUSES.indexOf(patch.status) < 0) throw new Error('未知状态: ' + patch.status)
+          if (patch.status === 'running') throw new Error('running 列只能通过派发进入')
         }
-        const out = await dispatchOp({ slug, id: String(args.id || '') })
-        const task = out && out.task
-        return '已派发看板任务：' + (task ? task.title + '（id=' + task.id + '，状态=running）' : 'ok')
+        locateTask(args, id) // 提前校验存在性，给出可读错误
+        return mutate(() => {
+          const { slug, task } = locateTask(args, id)
+          if ('status' in patch && patch.status !== null && patch.status !== undefined && patch.status !== task.status) {
+            if (task.status === 'running') throw new Error('任务正在运行：请先用 kanban_stop_task 停止，再改状态')
+            moveTaskInner(slug, id, patch.status, 'agent')
+          }
+          const editPatch = {}
+          for (const k of ['title', 'body', 'priority', 'assignee']) {
+            if (k in patch && patch[k] !== undefined) editPatch[k] = patch[k]
+          }
+          if ('schedule' in patch && patch.schedule !== undefined) editPatch.schedule = patch.schedule
+          if (Object.keys(editPatch).length > 0) patchTaskInner(slug, id, editPatch)
+          const fresh = locateTask(args, id).task
+          return '已更新任务：' + fresh.title + '（id=' + fresh.id + '，状态=' + STATUS_LABEL[fresh.status] + '）'
+        })
       },
-    }))
+      presentCall: () => ({ card: 'generic', title: '看板：更新任务' }),
+      presentResult: (_a, value) => textResultView('看板：已更新任务', value),
+    },
+    {
+      name: 'kanban_add_comment',
+      description: '给看板任务追加一条评论（面向人：写在卡片上的备注/进展/遗留事项）。评论显示在看板任务详情里，并随下次派发带入子代理上下文。board 省略时在所有看板中查找任务 id。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: ID_PARAM,
+          board: NO_BOARD_BOARD_PARAM,
+          body: { type: 'string', description: '评论内容（必填）。' },
+        },
+        required: ['id', 'body'],
+      },
+      async execute(args) {
+        await load()
+        const id = reqId(args)
+        const body = cap(String(args.body || '').trim(), 4000)
+        if (!body) throw new Error('评论不能为空')
+        locateTask(args, id)
+        return mutate(() => {
+          const { slug } = locateTask(args, id)
+          const out = addCommentInner(slug, id, body, 'agent')
+          return '已评论任务：' + out.task.title + '（id=' + out.task.id + '）'
+        })
+      },
+      presentCall: () => ({ card: 'generic', title: '看板：评论任务' }),
+      presentResult: (_a, value) => textResultView('看板：已追加评论', value),
+    },
+    {
+      name: 'kanban_dispatch_task',
+      description: '将 DSH 看板中「就绪」(ready) 列的任务派发给子代理执行。任务必须处于 ready 列；运行完成后自动转「完成」并回写摘要，失败或心跳超时转「阻塞」。运行期间可用 kanban_get_task 查询进度与结果；可用 kanban_stop_task 停止。可选 instructions 追加本轮补充要求（随任务正文发给子代理）。board 省略时使用第一个看板。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: ID_PARAM,
+          board: BOARD_PARAM,
+          instructions: { type: 'string', description: '可选：追加给子代理的本轮补充要求（如验收重点、环境说明）。' },
+        },
+        required: ['id'],
+      },
+      async execute(args) {
+        const slug = await resolveBoardSlug(args)
+        const out = await dispatchOp({ slug, id: reqId(args), instructions: args.instructions })
+        const task = out && out.task
+        return '已派发看板任务：' + (task ? task.title + '（id=' + task.id + '，状态=running' + (task.run && task.run.runId ? '，runId=' + task.run.runId : '') + '）。运行期间可用 kanban_get_task 查询进度与结果。' : 'ok')
+      },
+      presentCall(args) {
+        const id = String((args && args.id) || '')
+        return { card: 'generic', title: '看板：派发任务（id=' + shortId(id) + '）' }
+      },
+      presentResult: (_a, value) => textResultView('看板：已派发任务', value),
+    },
+    {
+      name: 'kanban_stop_task',
+      description: '终止正在运行(running)的看板任务：停止其子代理并把任务移回「就绪」列，之后可修改或重新派发。board 省略时在所有看板中查找任务 id。',
+      parameters: { type: 'object', properties: { id: ID_PARAM, board: NO_BOARD_BOARD_PARAM }, required: ['id'] },
+      async execute(args) {
+        await load()
+        const id = reqId(args)
+        locateTask(args, id)
+        return mutate(() => {
+          const { slug, task } = locateTask(args, id)
+          if (task.status !== 'running') throw new Error('任务未在运行（当前状态：' + STATUS_LABEL[task.status] + '）')
+          terminateInner(slug, id, 'agent')
+          return '已停止任务：' + task.title + '（id=' + task.id + '，已移回就绪）'
+        })
+      },
+      presentCall(args) {
+        const id = String((args && args.id) || '')
+        return { card: 'generic', title: '看板：停止任务（id=' + shortId(id) + '）' }
+      },
+      presentResult: (_a, value) => textResultView('看板：已停止任务', value),
+    },
+    {
+      name: 'kanban_delete_task',
+      description: '删除看板任务（不可恢复）。若任务正在运行会先终止其子代理；等待该任务的子卡片会被激活。board 省略时在所有看板中查找任务 id。',
+      parameters: { type: 'object', properties: { id: ID_PARAM, board: NO_BOARD_BOARD_PARAM }, required: ['id'] },
+      async execute(args) {
+        await load()
+        const id = reqId(args)
+        locateTask(args, id)
+        return mutate(() => {
+          const { slug } = locateTask(args, id)
+          const removed = deleteTaskInner(slug, id)
+          return '已删除任务：' + removed.title + '（id=' + removed.id + '）'
+        })
+      },
+      presentCall(args) {
+        const id = String((args && args.id) || '')
+        return { card: 'generic', title: '看板：删除任务（id=' + shortId(id) + '）' }
+      },
+      presentResult: (_a, value) => textResultView('看板：已删除任务', value),
+    },
+    {
+      name: 'kanban_create_board',
+      description: '新建一个看板。name 为显示名；slug 可选（省略时由名称自动生成），供工具与 RPC 定位看板。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '看板名称（必填）。' },
+          slug: { type: 'string', description: '看板 slug（可选，小写字母/数字/连字符）。' },
+        },
+        required: ['name'],
+      },
+      async execute(args) {
+        const name = cap(String(args.name || '').trim(), 80)
+        if (!name) throw new Error('看板名称不能为空')
+        const board = await mutate(() => createBoardInner({ name, slug: args.slug }))
+        return '已创建看板：' + board.name + '（slug=' + board.slug + '）'
+      },
+      presentCall(args) {
+        const n = String((args && args.name) || '').trim()
+        return { card: 'generic', title: '看板：创建看板「' + cap(n || '（无名称）', 40) + '」' }
+      },
+      presentResult: (_a, value) => textResultView('看板：已创建看板', value),
+    },
+  ]
+
+  const tools = ctx.get('tools')
+  if (tools && typeof tools.register === 'function') {
+    for (const def of KANBAN_TOOLS) {
+      disposers.push(tools.register({
+        name: def.name,
+        description: def.description,
+        parameters: def.parameters,
+        output: {
+          schema: { type: 'string' },
+          render(_args, value) { return [{ type: 'text', text: String(value) }] },
+        },
+        async execute(args) { return def.execute(args || {}) },
+        presentCall: def.presentCall,
+        presentResult: def.presentResult,
+      }))
+    }
   }
 
   // —— 事件循环：运行心跳 + 实时进度（定时激活由每任务的 ctx.timeout + 父完成钩子驱动，不在此循环）——

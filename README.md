@@ -15,7 +15,8 @@ DSH-kanban/
 ├── plugin/                  # 静态包 dsh-kanban（真实 ESM / 浏览器 bundle）
 │   ├── package.json         # 包清单：exports ./client、dsh.client 声明（platform: web）
 │   ├── index.js             # 包根再导出（兼容按目录候选 index.js 的解析路径）
-│   ├── host.js              # Host 半：JSON 存储 + 14 个 RPC + 子代理派发/终止 + 事件循环（定时/心跳/进度）+ 2 个 Agent 工具 + webServer 路由 /kanban/rpc
+│   ├── host.js              # Host 半：JSON 存储 + 14 个 RPC + 子代理派发/终止 + 事件循环（定时/心跳/进度）+ 10 个 Agent 工具 + 运行时 skill 注册 + webServer 路由 /kanban/rpc
+│   ├── skill.js             # 运行时 skill「kanban」的内容（宿主启动时注册进 skills 注册表）
 │   └── client.js            # Client bundle：window.__ModuleLoader__.load 注册，看板 UI（conversation.view「看板」标签页），fetch /kanban/rpc
 └── README.md                # 本文档
 ```
@@ -38,7 +39,7 @@ DSH-kanban/
          name: dsh-kanban
    ```
 
-3. 重启 `npx @deepseek-ai/dsh web` 并刷新页面。所有会话——无论选择哪个预设——都自动获得插件（看板标签页 + `kanban_create_task` / `kanban_dispatch_task` 工具）。需要对所有 profile 生效时，把同一段补丁放进家级补丁层 `<DSH_HOME>\cordis.patch.yml`。
+3. 重启 `npx @deepseek-ai/dsh web` 并刷新页面。所有会话——无论选择哪个预设——都自动获得插件（看板标签页 + 10 个 `kanban_*` 工具 + skill 目录中的 `kanban`）。需要对所有 profile 生效时，把同一段补丁放进家级补丁层 `<DSH_HOME>\cordis.patch.yml`。
 
 ## 更新流程
 
@@ -64,7 +65,8 @@ DSH-kanban/
 - **DSH 代理派发**（核心）：Ready 任务点「▶ 派发给 DSH 代理执行」→ 宿主启动 DSH 子代理执行任务（Agent 工具渠道挂靠当前发起代理；UI 渠道优先挂靠最近有会话活动的根代理，其次第一个根）→ 完成后自动转「完成」并回写结果摘要；失败转「阻塞」并记录错误；可「■ 停止运行」（任务回到就绪）
 - **运行心跳**（事件循环）：子会话日志活动（`session/event`）与进度文件更新都会刷新 `heartbeat_at`；超过 30 分钟无任何信号 → 终止运行并转「阻塞」（原因：心跳丢失），杜绝"假运行"卡片；超时可用环境变量 `DSH_KANBAN_HEARTBEAT_MS`（毫秒）覆盖
 - **实时进度**（事件循环）：派发提示词要求子代理向 `DSH-kanban/runs/<任务ID>.progress` 追加进度行，循环读取并在抽屉「执行」区显示最近 50 行
-- **Agent 渠道**：Host 注册模型工具 `kanban_create_task`，主 Agent 可在对话中直接创建看板任务（标题必填；看板/初始列/优先级/子Agent模型/定时 schedule 可选），与 UI 创建走同一套校验（含父卡片环检测）、事件与落盘逻辑
+- **Agent 渠道（10 个工具 + skill 引导）**：Host 注册运行时 skill `kanban`（进入会话 skill 目录，模型可主动加载，用户可 `/kanban` 注入），并注册 10 个模型工具——读：`kanban_list_boards` / `kanban_list_tasks` / `kanban_get_task`；写：`kanban_create_task` / `kanban_update_task` / `kanban_add_comment` / `kanban_create_board`；执行：`kanban_dispatch_task` / `kanban_stop_task` / `kanban_delete_task`。全部与 UI 操作走同一套校验（含父卡片环检测）、事件与落盘逻辑；省略 `board` 的定位类工具会在所有看板中查找任务 id。工具调用在对话中以 `presentCall`/`presentResult` 渲染为文字提示卡片（不做自定义富卡片）
+- **结算提醒（纯文字）**：客户端帧级浮层（`shell.overlay` 槽位）5s 轮询快照 diff——任务完成/失败弹 6s 文字 toast，有任务运行时显示常驻胶囊「看板运行中 N」；页面刷新不回放历史结算
 - **持久化**：每次变更 250ms 防抖落盘；刷新页面、重跑插件、重启 DSH 数据都不丢
 
 ## 入口
@@ -91,7 +93,7 @@ DSH-kanban/
         "nextAt": 1786642238696 | null          // 下一次激活时间（epoch 毫秒）；激活后置 null，重复任务在完成后回排
       },
       "created_at": …, "updated_at": …,
-      "comments": [{ "id": "c_xxx", "author": "user", "body": "…", "created_at": … }],
+      "comments": [{ "id": "c_xxx", "author": "user" | "agent", "body": "…", "created_at": … }],
       "events":  [{ "id": 1, "kind": "created|edited|moved|commented|dispatched|completed|terminated|blocked", "payload": {}, "created_at": … }],
       "run": null | { "provider": "…", "runId": "…", "seq": 1, "started_at": …, "ended_at": …,
         "outcome": "done|error|terminated", "summary": "…", "error": "…",
@@ -126,6 +128,7 @@ DSH-kanban/
 
 【任务标题】<title>
 【任务描述】<body>（有则输出）
+【补充要求】<instructions>（派发时给出则输出）
 
 【进度汇报】
 看板会通过工作区文件 DSH-kanban/runs/<任务ID>.progress 实时展示你的执行进度。
@@ -133,13 +136,38 @@ DSH-kanban/
 追加一行简短的中文进度说明。只追加、不覆盖、不删除该文件，也不要写入时间戳
 （看板会自动记录时间）。若某个步骤需要长时间执行，请在该步骤开始与结束时各追加一行。
 
-【追加评论】…（有评论时：`- user MM-DD HH:mm：内容` 逐行列出）
+【追加评论】…（有评论时：`- <author> MM-DD HH:mm：内容` 逐行列出，author 为 user 或 agent）
 【上次运行】…（有运行记录时：结果/摘要/错误）
+
+【看板协作】
+若你的会话中提供看板工具（kanban_add_comment 等），可以用它们向本任务追加评论（供看板
+界面的人阅读），但不要用任何工具修改本任务的状态或字段：任务状态由看板的结算逻辑自动管理。
 
 【完成要求】
 请在当前工作区中完成该任务。完成后，用一段简短的总结说明你做了什么、结果如何、
 以及遗留事项（如有）。这段总结将作为任务的完成摘要写回看板。
 ```
+
+## Agent 工具清单（Host `KANBAN_TOOLS`）
+
+| 工具 | 作用 | 定位方式（省略 board 时） |
+|---|---|---|
+| `kanban_list_boards` | 列出全部看板与各列负载 | — |
+| `kanban_list_tasks` | 按 status/priority_min/assignee/query/limit 过滤列任务（按优先级降序） | 第一个看板 |
+| `kanban_get_task` | 任务全量：字段/评论(近20)/事件(近20)/最近运行(结果、摘要、错误、进度尾 50 行) | 所有看板搜索 id |
+| `kanban_create_task` | 建卡（title 必填；body/status/priority/assignee/schedule 可选） | 第一个看板 |
+| `kanban_update_task` | patch 改字段（title/body/priority/assignee/schedule）或移动 status 列；拒绝改 running 任务（先用 stop） | 所有看板搜索 id |
+| `kanban_add_comment` | 追加评论（author=agent，面向人） | 所有看板搜索 id |
+| `kanban_dispatch_task` | 派发 ready 任务；可选 instructions 追加本轮【补充要求】 | 第一个看板 |
+| `kanban_stop_task` | 终止 running 任务，回 ready | 所有看板搜索 id |
+| `kanban_delete_task` | 删除任务（不可恢复） | 所有看板搜索 id |
+| `kanban_create_board` | 新建看板（name 必填，slug 可选） | — |
+
+所有工具返回值是面向人的一句话中文提示；对话中的调用卡片走 `presentCall`/`presentResult`（`card: 'generic'` 文字标题 + 结果文本），不注册自定义 toolview。
+
+## Skill 引导（Host 运行时注册）
+
+插件启动时通过 `ctx.skills.register` 注册运行时 skill `kanban`（来源 `custom`，全局层，所有预设/会话可见）：内容见 `plugin/skill.js`，说明何时用看板（多步骤/长期/定时/需委派的任务）、卡片生命周期、字段约定、标准工作流与面向人的书写礼仪。模型可经 `skill` 工具加载全文，用户可直接 `/kanban` 注入。若宿主不含 skills 服务则跳过注册（仅 console.warn），引导降级为工具描述内嵌约定。
 
 ## 限制与已知行为
 
@@ -152,8 +180,12 @@ DSH-kanban/
 - RPC 路由 `/kanban/rpc` 校验浏览器 Origin 与 Host 一致（跨站请求返回 403）；命令行等无 Origin 头的客户端不受影响
 - 手动/批量移入「定时」列的任务默认纯停放（不自动激活），需在抽屉设置定时方式（间隔/每天/父卡片）；带重复定时（interval/daily）的任务拖离「定时」列到除「就绪」以外的列会**清除其定时**（终止循环）；重复任务本轮执行失败转「阻塞」后需手动移回「定时」列才会重新排期
 - 旧版数据的 `scheduled_at` 字段在加载时自动删除（旧定时系统已移除）
+- Agent 派发是异步的：派发工具立即返回，主 Agent 需用 `kanban_get_task` 轮询运行结果与进度（工具说明与 skill 均已写明）；工具不提供阻塞式等待
+- `kanban_update_task` 拒绝直接修改 running 任务的状态（需先 `kanban_stop_task` 停回就绪）；看板页拖拽仍按原行为「终止运行并移动」
 
 ## 变更记录
+
+- 2026-08-15：**Agent 渠道补全 + 文字提示**——① **skill 引导**：新增 `plugin/skill.js`，宿主启动时经 `ctx.skills.register` 注册运行时 skill「kanban」（来源 custom、全局层，所有会话的 skill 目录可见；inject 增加 skills；服务缺失时仅 warn 降级）。② **工具面 2 → 10**：新增 `kanban_list_boards` / `kanban_list_tasks`（过滤+分页，按优先级降序）/ `kanban_get_task`（全量含评论、事件、运行进度）/ `kanban_update_task`（patch 编辑 + 状态移动；拒绝改 running）/ `kanban_add_comment`（author=agent）/ `kanban_stop_task` / `kanban_delete_task` / `kanban_create_board`；省略 board 时写/派发类工具用第一个看板、定位类工具全看板搜索 id；共享 `resolveBoardSlug`/`locateTask` helper 与注册工厂。③ **对话文字提示**：全部工具新增 `presentCall`/`presentResult`（`card:'generic'` 中文标题 + 结果摘要），不注册自定义 toolview、不引入 presentationMeta。④ **派发增强**：`kanban_dispatch_task` 新增可选 instructions（注入【补充要求】区块，cap 2000 字）；buildPrompt 新增【看板协作】区块（子代理可评论、不得改状态）。⑤ **结算提醒**：客户端注册 `shell.overlay` 槽位（id=kanban-status），5s 轮询快照 diff——完成/失败弹 6s 文字 toast、运行中显示「看板运行中 N」胶囊，首轮仅做基线不回放历史结算。⑥ **评论署名**：comment 增加 author（'user'/'agent'，存量补 'user'），事件 payload 与派发提示词携带；看板页 UI 不消费该字段。生效方式：改 Host 需重启 DSH，改 Client 刷新页面。
 
 - 2026-08-14：初版（动态插件 `kanban-1/pkg-1`），通过本会话验证；源码沉淀至 `plugin/`，数据文件 `kanban-store.json` 含示例看板「主看板」。
 - 2026-08-14：pkg-2 修复事件 ID 在插件重启后归零导致的重复 ID（React key 冲突），加载时自动修复存量数据。
