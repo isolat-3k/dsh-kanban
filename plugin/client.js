@@ -108,11 +108,10 @@ window.__ModuleLoader__.load({
         '.kbn-modal-actions { display:flex; justify-content:flex-end; gap:8px; }',
         '.kbn-empty { padding:40px; text-align:center; color:var(--dsw-alias-label-secondary); }',
         '.kbn-overlay { position:fixed; top:12px; right:12px; display:flex; flex-direction:column; align-items:flex-end; gap:8px; pointer-events:none; z-index:1000; }',
-        '.kbn-capsule { background:var(--dsw-alias-bg-overlay); border:1px solid var(--dsw-alias-border-l2); border-radius:12px; padding:3px 10px; font-size:11.5px; color:var(--dsw-alias-label-secondary); box-shadow:0 2px 10px rgba(0,0,0,.18); }',
-        '.kbn-toast { pointer-events:auto; background:var(--dsw-alias-bg-overlay); border:1px solid var(--dsw-alias-border-l2); border-left:3px solid #34d399; border-radius:8px; padding:7px 12px; min-width:200px; max-width:340px; box-shadow:0 4px 16px rgba(0,0,0,.25); }',
-        '.kbn-toast-bad { border-left-color:#f87171; }',
-        '.kbn-toast-title { font-size:12.5px; font-weight:600; color:var(--dsw-alias-label-primary); }',
-        '.kbn-toast-detail { font-size:11.5px; color:var(--dsw-alias-label-secondary); margin-top:3px; }',
+        '.kbn-toast { pointer-events:auto; background:rgba(31,41,55,.96); border:1px solid #6ee7b7; border-radius:8px; padding:7px 12px; min-width:200px; max-width:340px; box-shadow:0 4px 16px rgba(0,0,0,.25); }',
+        '.kbn-toast-bad { border-color:#fca5a5; }',
+        '.kbn-toast-title { font-size:12.5px; font-weight:600; color:#f9fafb; }',
+        '.kbn-toast-detail { font-size:11.5px; color:#d1d5db; margin-top:3px; }',
       ].join('\n')
 
       const STATUSES = [
@@ -707,6 +706,31 @@ window.__ModuleLoader__.load({
         )
       }
 
+      // 列收放偏好：只持久化「用户点过的列」（localStorage，按看板 slug 分键）。
+      // 未点过的列维持默认行为：有卡自动展开、空列自动收缩。
+      const COLLAPSED_KEY = 'dsh-kanban:collapsed:'
+      function readCollapsed(slug) {
+        if (!slug) return {}
+        try {
+          const raw = window.localStorage.getItem(COLLAPSED_KEY + slug)
+          if (!raw) return {}
+          const parsed = JSON.parse(raw)
+          const out = {}
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            for (const k of Object.keys(parsed)) {
+              if (typeof parsed[k] === 'boolean') out[k] = parsed[k]
+            }
+          }
+          return out
+        } catch (err) {
+          return {}
+        }
+      }
+      function writeCollapsed(slug, map) {
+        if (!slug) return
+        try { window.localStorage.setItem(COLLAPSED_KEY + slug, JSON.stringify(map)) } catch (err) {}
+      }
+
       function BoardContent() {
         const [store, setStore] = React.useState(null)
         const [slug, setSlug] = React.useState(null)
@@ -737,6 +761,11 @@ window.__ModuleLoader__.load({
           return ctx.interval(() => refresh(false), 5000)
         }, [])
 
+        // 进入/切换看板时恢复该看板用户点过的收放状态（没点过的列交给默认行为）
+        React.useEffect(() => {
+          setCollapsed(readCollapsed(slug))
+        }, [slug])
+
         const board = (store && slug) ? store.boards.find(b => b.slug === slug) : null
         const tasks = board ? board.tasks : []
         const drawerTask = board && drawerId ? board.tasks.find(t => t.id === drawerId) : null
@@ -745,6 +774,12 @@ window.__ModuleLoader__.load({
 
         function doMove(id, status) {
           call('moveTask', { slug, id, status }).then(() => refresh(false)).catch(e => setError(String((e && e.message) || e)))
+        }
+        function toggleCollapse(laneId, laneTasks) {
+          const cur = collapsed[laneId] !== undefined ? collapsed[laneId] : laneTasks.length === 0
+          const next = { ...collapsed, [laneId]: !cur }
+          setCollapsed(next)
+          writeCollapsed(slug, next)
         }
         function toggleSelect(id) {
           setSel(prev => {
@@ -792,13 +827,13 @@ window.__ModuleLoader__.load({
             },
               store.boards.map(b => h('option', { key: b.slug, value: b.slug }, b.name + '（' + b.tasks.length + '）')),
             ) : null,
-            h('button', { className: 'kbn-btn', onClick: () => setCreating(!creating) }, '＋ 看板'),
+            h('button', { className: 'kbn-btn', onClick: () => setCreating(!creating) }, '新建看板'),
             confirmBoardDel ? h('button', { className: 'kbn-btn kbn-btn-danger', disabled: !board, onClick: doDeleteBoard }, '确认删除当前看板') : null,
             board && !confirmBoardDel ? h('button', { className: 'kbn-btn kbn-btn-danger', onClick: () => setConfirmBoardDel(true) }, '删板') : null,
             confirmBoardDel ? h('button', { className: 'kbn-btn', onClick: () => setConfirmBoardDel(false) }, '取消') : null,
-            h('button', { className: 'kbn-btn' + (showArchived ? ' on' : ''), onClick: () => setShowArchived(!showArchived) }, '显示归档'),
+            h('button', { className: 'kbn-btn' + (showArchived ? ' on' : ''), onClick: () => setShowArchived(!showArchived) }, '显示已归档列'),
             h('button', { className: 'kbn-btn kbn-btn-run', disabled: !board, onClick: () => setDialog({ lane: 'triage' }) }, '＋ 新任务'),
-            h('button', { className: 'kbn-btn', title: '强制重读磁盘数据', onClick: () => refresh(true) }, '↻'),
+            h('button', { className: 'kbn-btn', title: '强制重读磁盘数据', onClick: () => refresh(true) }, '刷新'),
           ),
           creating ? h(CreateBoardForm, { onCreated: newSlug => { setSlug(newSlug); refresh(false) }, onClose: () => setCreating(false) }) : null,
           selIds.length > 1 ? h(BulkBar, {
@@ -807,7 +842,7 @@ window.__ModuleLoader__.load({
             onDelete: doBulkDelete,
             onClear: () => setSel({}),
           }) : null,
-          store.boards.length === 0 ? h('div', { className: 'kbn-empty' }, '还没有看板。点击「＋ 看板」创建第一个看板。') : null,
+          store.boards.length === 0 ? h('div', { className: 'kbn-empty' }, '还没有看板。点击「新建看板」创建第一个看板。') : null,
           h('div', { className: 'kbn-cols', onClick: () => { if (selIds.length > 0) setSel({}) } },
             lanes.map(lane => {
               const laneTasks = tasks.filter(t => t.status === lane.id)
@@ -829,7 +864,7 @@ window.__ModuleLoader__.load({
                 onOpenTask: id => setDrawerId(id),
                 onToggleSelect: toggleSelect,
                 onNewTask: laneId => setDialog({ lane: laneId }),
-                onToggleCollapse: laneId => setCollapsed(prev => ({ ...prev, [laneId]: !isCollapsed })),
+                onToggleCollapse: () => toggleCollapse(lane.id, laneTasks),
                 onToggleFilter: laneId => setFilterOpen(prev => ({ ...prev, [laneId]: !prev[laneId] })),
                 onFilterChange: (laneId, text) => setFilters(prev => ({ ...prev, [laneId]: text })),
               })
@@ -857,12 +892,10 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'kbn-view' }, h(BoardContent))
       }
 
-      // —— 帧级浮层：任务结算文字 toast + 运行中状态胶囊（纯文字提示，5s 轮询 getStore 快照 diff）——
+      // —— 帧级浮层：任务结算文字 toast（纯文字提示，5s 轮询 getStore 快照 diff）——
       function KanbanOverlay() {
         const [toasts, setToasts] = React.useState([])
-        const [runningCount, setRunningCount] = React.useState(0)
         const seenRef = React.useRef(null)
-        const runningRef = React.useRef(0)
 
         React.useEffect(() => {
           let alive = true
@@ -873,12 +906,10 @@ window.__ModuleLoader__.load({
               const boards = (data && data.boards) || []
               const nextSeen = seenRef.current || {}
               const newToasts = []
-              let running = 0
               for (const b of boards) {
                 for (const t of b.tasks || []) {
                   const run = t.run
                   const prev = nextSeen[t.id]
-                  if (t.status === 'running' && run) running++
                   if (run && run.outcome && (!prev || prev.outcome !== run.outcome)) {
                     if (run.outcome === 'done') {
                       newToasts.push({ key: 't' + (++seq), tone: 'ok', title: '看板任务「' + cap(t.title, 30) + '」已完成', detail: '' })
@@ -904,10 +935,6 @@ window.__ModuleLoader__.load({
                   }
                 }
               }
-              if (running !== runningRef.current) {
-                runningRef.current = running
-                setRunningCount(running)
-              }
             }).catch(() => {
               // 轮询失败静默：下个周期重试
             })
@@ -916,9 +943,8 @@ window.__ModuleLoader__.load({
           return ctx.interval(scan, 5000)
         }, [])
 
-        if (toasts.length === 0 && runningCount === 0) return null
+        if (toasts.length === 0) return null
         return h('div', { className: 'kbn-overlay' },
-          runningCount > 0 ? h('div', { className: 'kbn-capsule' }, '● 看板运行中 ' + runningCount) : null,
           toasts.map(t => h('div', { key: t.key, className: 'kbn-toast' + (t.tone === 'bad' ? ' kbn-toast-bad' : '') },
             h('div', { className: 'kbn-toast-title' }, t.title),
             t.detail ? h('div', { className: 'kbn-toast-detail' }, cap(t.detail, 120)) : null,

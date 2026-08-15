@@ -7,7 +7,7 @@
 // undefined（strict 检查 fiber.state===2），导致 webServer 路由被静默跳过、页面永远「加载中」。
 import { KANBAN_SKILL } from './skill.js'
 
-export const inject = ['fs', 'timer', 'webServer', 'tools', 'subagents', 'agents', 'sandboxPolicy', 'skills']
+export const inject = ['fs', 'timer', 'llm', 'webServer', 'tools', 'subagents', 'agents', 'sandboxPolicy', 'skills']
 
 export function apply(ctx) {
   const sandboxPolicy = ctx.get('sandboxPolicy')
@@ -555,10 +555,10 @@ export function apply(ctx) {
     const seen = new Set()
     const models = []
     for (const p of providers) {
-      const name = typeof p === 'string' ? p : (p.name || p.id || p.provider)
-      if (!name) continue
+      const providerKey = typeof p === 'string' ? p : (p.id || p.name || p.provider)
+      if (!providerKey) continue
       try {
-        const list = await llm.listModels(name)
+        const list = await llm.listModels(providerKey)
         for (const m of list) {
           const id = m && (m.id || m.name || m.model)
           if (id && !seen.has(id)) {

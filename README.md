@@ -5,11 +5,16 @@
 > 原型：Hermes 桌面端看板插件（`apps/desktop/src/plugins/kanban/`，功能分析见同目录《看板插件功能报告.md》）。
 > 实现形式：**静态插件包 `dsh-kanban`，宿主平面挂载（不经任何 Agent 预设）**。插件以 ES 模块包（`plugin/`，Host 半 + dsh.client 客户端 bundle）落地，由 web profile 的补丁层 `~/.dsh/profiles/web/cordis.patch.yml`（`insert` 一行）挂载进宿主组合；进程启动即生效，任意预设的会话都自动获得看板工具与「看板」标签页。**看板数据永久落盘于 `kanban-store.json`。**
 
+## 界面预览
+
+![看板主界面](界面截图.png)
+
 ## 文件布局
 
 ```
 DSH-kanban/
 ├── 看板插件功能报告.md      # Hermes 原版功能分析（只读参考）
+├── 界面截图.png             # 看板主界面截图（README「界面预览」引用）
 ├── kanban-store.json        # 看板数据（任务/评论/事件/运行记录，自动生成与维护）
 ├── runs/                    # 派发任务的子代理进度文件（<任务ID>.progress，自动生成与维护，已 gitignore）
 ├── plugin/                  # 静态包 dsh-kanban（真实 ESM / 浏览器 bundle）
@@ -54,7 +59,7 @@ DSH-kanban/
 
 ## 功能清单
 
-- **9 列泳道**：待细化 → 待办 → 定时 → 就绪 → 运行中 → 阻塞 → 审核 → 完成 → 归档（配色沿用 Hermes `COLUMN_META`）；空列自动收窄为竖条（含竖排列名），点列头可手动折叠/展开；归档列默认隐藏可切换显示
+- **9 列泳道**：待细化 → 待办 → 定时 → 就绪 → 运行中 → 阻塞 → 审核 → 完成 → 归档（配色沿用 Hermes `COLUMN_META`）；空列自动收窄为竖条（含竖排列名），点列头可手动折叠/展开（手动收放过的列按选择记忆，localStorage 按看板分键）；归档列默认隐藏可切换显示
 - **任务卡片**：标题（两行截断）、正文摘要、优先级徽章、负责人、定时徽章（「还剩xx · 绝对时间」）、评论数、运行中标记、卡片年龄、按列着色左边条
 - **拖拽换列**：HTML5 原生拖放（与 Hermes board.tsx 同模式）
 - **Ctrl/Cmd 多选 + 批量操作条**：批量移动状态 / 批量删除
@@ -66,7 +71,7 @@ DSH-kanban/
 - **运行心跳**（事件循环）：子会话日志活动（`session/event`）与进度文件更新都会刷新 `heartbeat_at`；超过 30 分钟无任何信号 → 终止运行并转「阻塞」（原因：心跳丢失），杜绝"假运行"卡片；超时可用环境变量 `DSH_KANBAN_HEARTBEAT_MS`（毫秒）覆盖
 - **实时进度**（事件循环）：派发提示词要求子代理向 `DSH-kanban/runs/<任务ID>.progress` 追加进度行，循环读取并在抽屉「执行」区显示最近 50 行
 - **Agent 渠道（10 个工具 + skill 引导）**：Host 注册运行时 skill `kanban`（进入会话 skill 目录，模型可主动加载，用户可 `/kanban` 注入），并注册 10 个模型工具——读：`kanban_list_boards` / `kanban_list_tasks` / `kanban_get_task`；写：`kanban_create_task` / `kanban_update_task` / `kanban_add_comment` / `kanban_create_board`；执行：`kanban_dispatch_task` / `kanban_stop_task` / `kanban_delete_task`。全部与 UI 操作走同一套校验（含父卡片环检测）、事件与落盘逻辑；省略 `board` 的定位类工具会在所有看板中查找任务 id。工具调用在对话中以 `presentCall`/`presentResult` 渲染为文字提示卡片（不做自定义富卡片）
-- **结算提醒（纯文字）**：客户端帧级浮层（`shell.overlay` 槽位）5s 轮询快照 diff——任务完成/失败弹 6s 文字 toast，有任务运行时显示常驻胶囊「看板运行中 N」；页面刷新不回放历史结算
+- **结算提醒（纯文字）**：客户端帧级浮层（`shell.overlay` 槽位）5s 轮询快照 diff——任务完成/失败弹 6s 文字 toast；页面刷新不回放历史结算
 - **持久化**：每次变更 250ms 防抖落盘；刷新页面、重跑插件、重启 DSH 数据都不丢
 
 ## 入口
@@ -213,3 +218,9 @@ DSH-kanban/
 - 2026-08-14：**修复看板页永远「加载中」**——根因：插件 `inject` 只声明了 `fs/timer`，fiber 在启动早期即加载，此时 webServer 提供方 fiber 尚未激活，`ctx.get('webServer')`（strict 模式要求提供方 `fiber.state===2`）返回 `undefined`，路由注册被 `if (web && ...)` 静默跳过且不再重试；而 tools 服务加载早，工具分支正常注册（症状：Agent 工具可用、`POST /kanban/rpc` 405、页面无限加载）。修复：`inject` 补全 `webServer/tools/subagents/agents/sandboxPolicy`，Cordis 会等服务就绪再 apply（并在服务后到齐时自动重载）；同时客户端在初始加载失败时显示真实错误与「重试」按钮，不再永远显示「加载中…」。生效方式：改 Host 需重启 DSH（本次修复核心在 Host），改 Client 刷新页面即可。
 - 2026-08-14：**定时系统重做**——移除旧 `scheduled_at` 单时间戳 + 10s 循环提权；任务新增 `schedule` 对象：`interval`（每 N 分钟间隔重复，激活 `by:'interval'`，本轮完成后自动回排定时列）、`daily`（每天固定时刻，`by:'daily'`）、`parentId`（父卡片完成/归档/被删除时事件激活，`by:'parent'`；不设父卡片则不激活；kind 与父卡片同时设置时需两者都满足）。激活由每任务一个 `ctx.timeout` 驱动（`syncTimers` 对账，错过快进到未来一次，过期时以 30s 复查防热循环），事件循环只保留心跳与进度读取。卡片徽章/抽屉同时显示「还剩xx」与「绝对时间」。拖离定时列到除就绪外的列会清除定时；重复任务失败转阻塞后需手动移回定时列重新排期。加载时自动删除旧 `scheduled_at` 字段（数据迁移）。`kanban_create_task` 工具的定时参数尚未同步（后续补齐）。生效方式：改 Host 需重启 DSH，改 Client 刷新页面。
 - 2026-08-15：**修复批次（代码审查后）**——① **停止运行竞态**：`terminate` 置就绪后，迟到的 `run.result`（stopReason=aborted）会经 settle 把任务覆盖为「阻塞/失败」；`settleRun`/`settleError` 增加 `outcome !== null` 守卫（终止/拖离/心跳超时均已先落 outcome），「已终止」不再被迟到结果覆盖。② **Agent 工具对齐新定时模型**：`kanban_create_task` 删除已失效的 `scheduled_at` 死参数，新增 `schedule` 对象参数（kind/intervalMinutes/dailyTime/parentId），与 UI 同走 `normalizeSchedule` 校验。③ **父卡片链环检测**：设置 parentId 时沿现有父链向上查找，祖先成环直接报错，杜绝 A 等 B、B 等 A 死锁。④ **interval 锚点防漂移**：schedule 新增 `base` 锚点（编辑保留、加载时对存量数据补齐），回排按整倍数网格计算，每 N 分钟语义不再随运行时长漂移。⑤ **RPC 同源校验**：Origin 与 Host 不一致的浏览器请求返回 403。⑥ **UI 派发父会话选择**：优先最近有会话活动的根代理（`lastActiveRootId`，由 `session/event` 追踪），其次第一个根。⑦ 心跳超时支持环境变量 `DSH_KANBAN_HEARTBEAT_MS` 覆盖。⑧ dispose 落盘返回 Promise（宿主等待清理回调时可保证最终写入）。⑨ 清理 `createTaskOp` 死参数 triage。⑩ 客户端抽屉编辑态在服务端字段真正变化时自动同步（外部修改不丢、5s 轮询不打断输入）。生效方式：改 Host 需重启 DSH，改 Client 刷新页面。
+
+- 2026-08-15：**UI 细节微调 + 子Agent模型选择修复**——① 工具栏文案：「＋ 看板」→「新建看板」、「显示归档」→「显示已归档列」、刷新按钮「↻」→「刷新」文字（空状态提示文案同步）；② 结算 toast 重做：深色半透明底 + 1px 浅绿细边框（失败款浅红边框），文字改浅色，去掉左侧 3px 色条；③ 修复「子Agent模型」下拉取不到模型：`inject` 补声明 `llm` 服务，`listModels` 按 provider 的 id（而非显示名）查询模型列表（llm 服务以 id 为路由键）。生效方式：改 Host 需重启 DSH，改 Client 刷新页面。
+
+- 2026-08-15：**移除「看板运行中 N」常驻胶囊**——浮层只保留结算 toast（完成/阻塞 6s 自动消失），运行计数状态与 `.kbn-capsule` 样式一并删除。生效方式：改 Client，刷新页面。
+
+- 2026-08-15：**列收放状态记忆**——用户手动收放过的列写入 localStorage（按看板 slug 分键），切页/刷新后保持用户选择；未点过的列维持默认行为（有卡自动展开、空列自动收缩）。生效方式：改 Client，刷新页面。
