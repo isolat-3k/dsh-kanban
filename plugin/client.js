@@ -55,11 +55,14 @@ window.__ModuleLoader__.load({
           'd.interval': '间隔（分钟，1-10080，最长 7 天）', 'd.dailyTime': '每天时刻',
           'd.parent': '父卡片（可选：父卡片完成时激活；不设则不激活）', 'd.parentNone': '无（不设置父卡片）',
           'd.currentSchedule': '当前定时', 'd.parentCard': '父卡片：{a}（{b}）', 'd.parentDeleted': '已删除（视为已完成）',
-          'd.nextActivation': '下次激活：{a}　{b}', 'd.save': '保存修改', 'd.run': '执行',
+          'd.nextActivation': '下次激活：{a}　{b}', 'd.saving': '保存中…', 'd.run': '执行',
           'd.providerRun': 'Provider：{a}　Run：{b}', 'd.started': '开始：{a}', 'd.ended': '　结束：{a}',
           'd.lastActive': '最近活动：{a}', 'd.resultDone': '结果：完成', 'd.resultError': '结果：失败',
           'd.resultTerminated': '结果：已终止', 'd.error': '错误：{a}', 'd.neverRun': '尚未执行过',
-          'd.progress': '实时进度（最近 {a} 行）', 'd.dispatchBtn': '▶ 派发给 DSH 代理执行', 'd.stopBtn': '■ 停止运行',
+          'd.progress': '实时进度（最近 {a} 行）', 'd.stopBtn': '■ 停止运行',
+          'd.autoHint': '本卡在「待办/就绪」列：看板会自动派发给 DSH 代理执行（事件循环最多等 10s）',
+          'd.autoHintParent': '已设父卡片：等父卡片完成/归档后才会自动派发',
+          'd.stopNote': '停止运行会把任务移回「待细化」，避免被自动派发立即重跑',
           'd.runningRepeat': '重复任务：本轮完成后自动回到「定时」列等待下一轮；失败则转「阻塞」。',
           'd.runningOnce': '已派发给 DSH 子代理执行，完成后自动流转为「完成」；失败则转「阻塞」。',
           'd.comments': '评论（{a}）', 'd.commentPh': '写评论…（运行期间新评论不会实时送达代理）', 'd.commentBtn': '发表评论',
@@ -108,11 +111,14 @@ window.__ModuleLoader__.load({
           'd.interval': 'Interval (minutes, 1-10080, max 7 days)', 'd.dailyTime': 'Daily time',
           'd.parent': 'Parent card (optional: activates when the parent completes; none = never)', 'd.parentNone': 'None (no parent card)',
           'd.currentSchedule': 'Current schedule', 'd.parentCard': 'Parent card: {a} ({b})', 'd.parentDeleted': 'Deleted (treated as completed)',
-          'd.nextActivation': 'Next activation: {a} {b}', 'd.save': 'Save changes', 'd.run': 'Run',
+          'd.nextActivation': 'Next activation: {a} {b}', 'd.saving': 'Saving…', 'd.run': 'Run',
           'd.providerRun': 'Provider: {a} Run: {b}', 'd.started': 'Started: {a}', 'd.ended': ' Ended: {a}',
           'd.lastActive': 'Last activity: {a}', 'd.resultDone': 'Result: completed', 'd.resultError': 'Result: failed',
           'd.resultTerminated': 'Result: terminated', 'd.error': 'Error: {a}', 'd.neverRun': 'Never run',
-          'd.progress': 'Live progress (last {a} lines)', 'd.dispatchBtn': '▶ Dispatch to DSH agent', 'd.stopBtn': '■ Stop run',
+          'd.progress': 'Live progress (last {a} lines)', 'd.stopBtn': '■ Stop run',
+          'd.autoHint': 'This card is in a todo/ready column: the board auto-dispatches it to a DSH agent (within ~10s).',
+          'd.autoHintParent': 'Parent card set: it auto-dispatches after the parent completes or is archived.',
+          'd.stopNote': 'Stopping the run moves the task back to triage so auto-dispatch does not rerun it immediately.',
           'd.runningRepeat': 'Repeating task: returns to the scheduled column after this round; failures turn blocked.',
           'd.runningOnce': 'Dispatched to a DSH subagent; it turns done when finished, blocked on failure.',
           'd.comments': 'Comments ({a})', 'd.commentPh': 'Write a comment… (new comments are not delivered live while running)', 'd.commentBtn': 'Post comment',
@@ -336,14 +342,18 @@ window.__ModuleLoader__.load({
           parentId: s.parentId || '',
         }
       }
-      const schedulePayload = (sched) => (sched.kind === 'none'
-        ? null
-        : {
-            kind: sched.kind,
-            intervalMinutes: sched.kind === 'interval' ? Math.max(1, Math.min(10080, Math.round(Number(sched.intervalMinutes) || 60))) : undefined,
-            dailyTime: sched.kind === 'daily' ? sched.dailyTime : undefined,
-            parentId: sched.parentId ? sched.parentId : null,
-          })
+      const schedulePayload = (sched) => {
+        // 修复：只设父卡片（无 interval/daily）也必须保存——父卡片是全局门禁，任何列生效
+        const kind = sched.kind === 'interval' || sched.kind === 'daily' ? sched.kind : null
+        const parentId = sched.parentId ? sched.parentId : null
+        if (!kind && !parentId) return null
+        return {
+          kind,
+          intervalMinutes: kind === 'interval' ? Math.max(1, Math.min(10080, Math.round(Number(sched.intervalMinutes) || 60))) : undefined,
+          dailyTime: kind === 'daily' ? sched.dailyTime : undefined,
+          parentId,
+        }
+      }
 
       function call(method, args) {
         return fetch('/kanban/rpc', {
@@ -358,6 +368,78 @@ window.__ModuleLoader__.load({
           throw new Error((res && res.error) || t('err.unknown'))
         })
       }
+
+      // —— WebSocket 实时推送 channel：apply 闭包内单连接共享 ——
+      // BoardContent 与 KanbanOverlay 订阅同一连接；断线指数退避重连（1s 起，15s 上限），
+      // 断开期间调用方用 wsIsOpen() 判断并退回 5s 轮询。Host 无 /kanban/events 时同样回落。
+      const wsSubs = new Set()
+      let wsSocket = null
+      let wsRetry = 0
+      let wsTimer = null
+
+      function wsUrl() {
+        const proto = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss://' : 'ws://'
+        return proto + location.host + '/kanban/events'
+      }
+      function wsEmit(data) {
+        for (const fn of Array.from(wsSubs)) {
+          try { fn(data) } catch (err) {}
+        }
+      }
+      function wsScheduleRetry() {
+        if (wsTimer) return
+        const delay = Math.min(15000, 1000 * Math.pow(2, wsRetry))
+        wsRetry++
+        wsTimer = setTimeout(() => {
+          wsTimer = null
+          wsConnect()
+        }, delay)
+      }
+      function wsConnect() {
+        if (wsSocket || typeof WebSocket === 'undefined') return
+        let socket
+        try { socket = new WebSocket(wsUrl()) } catch (err) {
+          wsScheduleRetry()
+          return
+        }
+        wsSocket = socket
+        socket.onopen = () => {
+          wsRetry = 0
+          call('getStore').then(wsEmit).catch(() => {})
+        }
+        socket.onmessage = (ev) => {
+          if (typeof ev.data !== 'string') return
+          try {
+            const msg = JSON.parse(ev.data)
+            if (msg && msg.type === 'snapshot' && Array.isArray(msg.boards)) wsEmit({ boards: msg.boards, now: msg.now })
+          } catch (err) {}
+        }
+        socket.onclose = () => {
+          if (wsSocket === socket) wsSocket = null
+          wsScheduleRetry()
+        }
+        socket.onerror = () => {}
+      }
+      function wsSubscribe(fn) {
+        wsSubs.add(fn)
+        wsConnect()
+        return () => {
+          wsSubs.delete(fn)
+          if (wsSubs.size === 0) {
+            if (wsTimer) { clearTimeout(wsTimer); wsTimer = null }
+            const s = wsSocket
+            wsSocket = null
+            if (s) {
+              s.onopen = null
+              s.onmessage = null
+              s.onclose = null
+              s.onerror = null
+              try { s.close() } catch (err) {}
+            }
+          }
+        }
+      }
+      const wsIsOpen = () => Boolean(wsSocket && wsSocket.readyState === 1)
 
       function Lane(props) {
         const [over, setOver] = React.useState(false)
@@ -502,6 +584,7 @@ window.__ModuleLoader__.load({
         const [comment, setComment] = React.useState('')
         const [err, setErr] = React.useState(null)
         const [busy, setBusy] = React.useState(false)
+        const [saving, setSaving] = React.useState(false)
         const [confirmDel, setConfirmDel] = React.useState(false)
         const meta = statusOf(task.status)
 
@@ -512,25 +595,83 @@ window.__ModuleLoader__.load({
           }).catch(() => {})
         }, [])
 
-        // 服务端字段变化时同步本地编辑态：仅在任务真正被编辑（外部修改/其他标签页/Agent 工具）
-        // 时同步，运行进度与心跳等 5s 轮询刷新不会打断正在进行的输入。
+        // 实时保存：字段变化 600ms 防抖后自动 patchTask，不再有「保存」按钮。
+        // 服务端字段变化时同步本地编辑态（外部修改/其他标签页/Agent 工具）；自动保存自己的
+        // 成功回显（与 lastSent 字段一致）不回灌，避免覆盖正在进行的输入。
         const serverSigRef = React.useRef(JSON.stringify({
           title: task.title, body: task.body, assignee: task.assignee,
           priority: task.priority, schedule: task.schedule,
         }))
+        const lastSentRef = React.useRef(null)      // 最近一次成功提交的 patch；无变化时不提交
+        const baselineRef = React.useRef(false)     // 首轮只做基线不提交（避免打开抽屉就写 edited 事件）
+        const saveTimerRef = React.useRef(null)     // 防抖定时器；关闭抽屉时 flush
+        const skipNextSaveRef = React.useRef(false) // 服务端回灌引发的状态变化不再保存
+        const editRef = React.useRef({ title, body, assignee, priority, sched })
+        editRef.current = { title, body, assignee, priority, sched }
+
+        function buildPatch(cur) {
+          return {
+            title: String(cur.title || '').trim(),
+            body: cur.body || '',
+            assignee: cur.assignee || '',
+            priority: cur.priority,
+            schedule: schedulePayload(cur.sched),
+          }
+        }
+        function doSave() {
+          const patch = buildPatch(editRef.current)
+          if (JSON.stringify(patch) === JSON.stringify(lastSentRef.current)) { setSaving(false); return }
+          lastSentRef.current = patch
+          call('patchTask', { slug: props.slug, id: task.id, patch })
+            .then(() => { setErr(null); setSaving(false) })
+            .catch(e => {
+              lastSentRef.current = null // 提交失败：下次编辑重试
+              setErr(String((e && e.message) || e))
+              setSaving(false)
+            })
+        }
+        function flushSave() {
+          if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current)
+            saveTimerRef.current = null
+            doSave()
+          }
+        }
+        React.useEffect(() => {
+          if (!baselineRef.current) {
+            // 挂载即建立基线（初始字段不提交）；之后的任何变化正常防抖保存
+            baselineRef.current = true
+            lastSentRef.current = buildPatch(editRef.current)
+            return
+          }
+          if (skipNextSaveRef.current) { skipNextSaveRef.current = false; return }
+          setSaving(true)
+          saveTimerRef.current = setTimeout(() => {
+            saveTimerRef.current = null
+            doSave()
+          }, 600)
+          return () => {
+            if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+            saveTimerRef.current = null
+          }
+        }, [title, body, assignee, priority, sched])
         React.useEffect(() => {
           const sig = JSON.stringify({
             title: task.title, body: task.body, assignee: task.assignee,
             priority: task.priority, schedule: task.schedule,
           })
-          if (sig !== serverSigRef.current) {
-            serverSigRef.current = sig
-            setTitle(task.title || '')
-            setBody(task.body || '')
-            setAssignee(task.assignee || '')
-            setPriority(task.priority || 0)
-            setSched(schedFromTask(task))
+          if (sig === serverSigRef.current) return
+          serverSigRef.current = sig
+          const sent = lastSentRef.current
+          if (sent && sent.title === task.title && sent.body === (task.body || '') && (sent.assignee || null) === (task.assignee || null) && sent.priority === task.priority) {
+            return // 自己保存的成功回显：不回灌（schedule 回灌由保存自身收敛）
           }
+          skipNextSaveRef.current = true
+          setTitle(task.title || '')
+          setBody(task.body || '')
+          setAssignee(task.assignee || '')
+          setPriority(task.priority || 0)
+          setSched(schedFromTask(task))
         }, [task])
 
         function act(fn) {
@@ -544,7 +685,12 @@ window.__ModuleLoader__.load({
           h('div', { className: 'kbn-drawer-head' },
             h('span', { className: 'kbn-lane-rail-bar', style: { background: meta.tone, marginTop: 0 } }),
             h('span', { className: 'kbn-drawer-title' }, meta.label + ' · ' + task.id),
-            h('button', { className: 'kbn-icon-btn', title: t('d.close'), onClick: () => props.onClose() }, '✕'),
+            task.status === 'running' ? h('button', {
+              className: 'kbn-btn kbn-btn-stop',
+              disabled: busy,
+              onClick: () => act(() => call('terminate', { slug: props.slug, id: task.id })),
+            }, t('d.stopBtn')) : null,
+            h('button', { className: 'kbn-icon-btn', title: t('d.close'), onClick: () => { flushSave(); props.onClose() } }, '✕'),
           ),
           h('div', { className: 'kbn-drawer-scroll' },
             err ? h('div', { className: 'kbn-error' }, err) : null,
@@ -611,14 +757,7 @@ window.__ModuleLoader__.load({
                 typeof task.schedule.nextAt === 'number' ? h('div', null, t('d.nextActivation', { a: fmtRemain(task.schedule.nextAt), b: fmtAbs(task.schedule.nextAt) })) : null,
               ),
             ) : null,
-            h('button', {
-              className: 'kbn-btn',
-              disabled: busy || !title.trim(),
-              onClick: () => act(() => call('patchTask', {
-                slug: props.slug, id: task.id,
-                patch: { title: title.trim(), body, assignee, priority, schedule: schedulePayload(sched) },
-              })),
-            }, t('d.save')),
+            saving ? h('div', { className: 'kbn-run-hint' }, t('d.saving')) : null,
             h('div', { className: 'kbn-runbox' },
               h('div', { className: 'kbn-section-title', style: { marginBottom: 0 } }, t('d.run')),
               task.run ? h('div', { className: 'kbn-run-info' },
@@ -635,25 +774,13 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'kbn-section-title', style: { marginBottom: 4 } }, t('d.progress', { a: task.run.progress.length })),
                 h('div', { className: 'kbn-run-summary' }, task.run.progress.join('\n')),
               ) : null,
-              (task.status !== 'running' && task.status !== 'archived') ? h('button', {
-                className: 'kbn-btn kbn-btn-run',
-                disabled: busy,
-                onClick: () => act(() => {
-                  const prepare = task.status === 'ready'
-                    ? Promise.resolve()
-                    : call('moveTask', { slug: props.slug, id: task.id, status: 'ready' })
-                  return prepare.then(() => call('dispatch', { slug: props.slug, id: task.id }))
-                }),
-              }, t('d.dispatchBtn')) : null,
-              task.status === 'running' ? h('button', {
-                className: 'kbn-btn kbn-btn-stop',
-                disabled: busy,
-                onClick: () => act(() => call('terminate', { slug: props.slug, id: task.id })),
-              }, t('d.stopBtn')) : null,
+              (task.status === 'todo' || task.status === 'ready') ? h('div', { className: 'kbn-run-hint' },
+                task.schedule && task.schedule.parentId ? t('d.autoHintParent') : t('d.autoHint')) : null,
               task.status === 'running' ? h('div', { className: 'kbn-run-hint' },
                 task.schedule && task.schedule.kind
                   ? t('d.runningRepeat')
                   : t('d.runningOnce')) : null,
+              task.status === 'running' ? h('div', { className: 'kbn-run-hint' }, t('d.stopNote')) : null,
             ),
             h('div', { className: 'kbn-comments' },
               h('div', { className: 'kbn-section-title' }, t('d.comments', { a: (task.comments || []).length })),
@@ -724,7 +851,7 @@ window.__ModuleLoader__.load({
           setErr(null)
           call('createTask', {
             slug: props.slug, title: title.trim(), body, assignee, priority, status,
-            schedule: status === 'scheduled' ? schedulePayload(sched) : null,
+            schedule: schedulePayload(sched),
           })
             .then(() => { props.onCreated(); props.onClose() })
             .catch(e => { setBusy(false); setErr(String((e && e.message) || e)) })
@@ -781,13 +908,13 @@ window.__ModuleLoader__.load({
               h('span', { className: 'kbn-field-label' }, t('d.dailyTime')),
               h('input', { className: 'kbn-input', type: 'time', value: sched.dailyTime, onChange: e => setSched({ ...sched, dailyTime: e.target.value }) }),
             ) : null,
-            status === 'scheduled' ? h('div', { className: 'kbn-field' },
+            h('div', { className: 'kbn-field' },
               h('span', { className: 'kbn-field-label' }, t('d.parent')),
               h('select', { className: 'kbn-input kbn-select', value: sched.parentId, onChange: e => setSched({ ...sched, parentId: e.target.value }) },
                 h('option', { value: '' }, t('d.parentNone')),
                 (props.tasks || []).map(x => h('option', { key: x.id, value: x.id }, x.title + '（' + statusOf(x.status).label + '）')),
               ),
-            ) : null,
+            ),
             h('div', { className: 'kbn-modal-actions' },
               h('button', { className: 'kbn-btn', onClick: () => props.onClose() }, t('ui.cancel')),
               h('button', { className: 'kbn-btn kbn-btn-run', disabled: busy, onClick: submit }, t('dlg.create')),
@@ -873,7 +1000,10 @@ window.__ModuleLoader__.load({
 
         React.useEffect(() => {
           refresh(false)
-          return ctx.interval(() => refresh(false), 5000)
+          const unsub = wsSubscribe(data => { setStore(data) })
+          // 兜底：WS 断开时才 5s 轮询；连接正常时由推送驱动
+          const poll = ctx.interval(() => { if (!wsIsOpen()) refresh(false) }, 5000)
+          return () => { unsub(); poll() }
         }, [])
 
         // 进入/切换看板时恢复该看板用户点过的收放状态（没点过的列交给默认行为）
@@ -1015,47 +1145,47 @@ window.__ModuleLoader__.load({
         React.useEffect(() => {
           let alive = true
           let seq = 0
-          function scan() {
-            call('getStore').then(data => {
-              if (!alive) return
-              const boards = (data && data.boards) || []
-              const nextSeen = seenRef.current || {}
-              const newToasts = []
-              for (const b of boards) {
-                for (const task of b.tasks || []) {
-                  const run = task.run
-                  const prev = nextSeen[task.id]
-                  if (run && run.outcome && (!prev || prev.outcome !== run.outcome)) {
-                    if (run.outcome === 'done') {
-                      newToasts.push({ key: 't' + (++seq), tone: 'ok', title: t('toast.done', { a: cap(task.title, 30) }), detail: '' })
-                    } else if (run.outcome === 'error') {
-                      newToasts.push({ key: 't' + (++seq), tone: 'bad', title: t('toast.blocked', { a: cap(task.title, 30) }), detail: run.error ? String(run.error) : '' })
-                    }
-                  }
-                  nextSeen[task.id] = { outcome: run && run.outcome ? run.outcome : null }
-                }
-              }
-              if (seenRef.current === null) {
-                // 首轮只做基线，不回放历史结算（刷新页面不刷旧 toast）
-                seenRef.current = nextSeen
-              } else {
-                seenRef.current = nextSeen
-                if (newToasts.length > 0) {
-                  setToasts(prev => [...prev, ...newToasts])
-                  for (const t of newToasts) {
-                    setTimeout(() => {
-                      if (!alive) return
-                      setToasts(prev => prev.filter(x => x.key !== t.key))
-                    }, 6000)
+          function scan(data) {
+            if (!alive) return
+            const boards = (data && data.boards) || []
+            const nextSeen = seenRef.current || {}
+            const newToasts = []
+            for (const b of boards) {
+              for (const task of b.tasks || []) {
+                const run = task.run
+                const prev = nextSeen[task.id]
+                if (run && run.outcome && (!prev || prev.outcome !== run.outcome)) {
+                  if (run.outcome === 'done') {
+                    newToasts.push({ key: 't' + (++seq), tone: 'ok', title: t('toast.done', { a: cap(task.title, 30) }), detail: '' })
+                  } else if (run.outcome === 'error') {
+                    newToasts.push({ key: 't' + (++seq), tone: 'bad', title: t('toast.blocked', { a: cap(task.title, 30) }), detail: run.error ? String(run.error) : '' })
                   }
                 }
+                nextSeen[task.id] = { outcome: run && run.outcome ? run.outcome : null }
               }
-            }).catch(() => {
-              // 轮询失败静默：下个周期重试
-            })
+            }
+            if (seenRef.current === null) {
+              // 首轮只做基线，不回放历史结算（刷新页面不刷旧 toast）
+              seenRef.current = nextSeen
+            } else {
+              seenRef.current = nextSeen
+              if (newToasts.length > 0) {
+                setToasts(prev => [...prev, ...newToasts])
+                for (const toast of newToasts) {
+                  setTimeout(() => {
+                    if (!alive) return
+                    setToasts(prev => prev.filter(x => x.key !== toast.key))
+                  }, 6000)
+                }
+              }
+            }
           }
-          scan()
-          return ctx.interval(scan, 5000)
+          // WS 快照驱动 diff；断线时退回 5s 轮询兜底
+          const unsub = wsSubscribe(scan)
+          const poll = ctx.interval(() => {
+            if (!wsIsOpen()) call('getStore').then(scan).catch(() => {})
+          }, 5000)
+          return () => { alive = false; unsub(); poll() }
         }, [])
 
         if (toasts.length === 0) return null

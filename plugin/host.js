@@ -6,6 +6,7 @@
 // 若只靠 apply 内 ctx.get()，启动早期服务提供方 fiber 尚未激活时 ctx.get 会返回
 // undefined（strict 检查 fiber.state===2），导致 webServer 路由被静默跳过、页面永远「加载中」。
 import { KANBAN_SKILLS } from './skill.js'
+import { createHash } from 'node:crypto'
 
 export const inject = ['fs', 'timer', 'llm', 'webServer', 'tools', 'subagents', 'agents', 'sandboxPolicy', 'skills']
 
@@ -43,7 +44,7 @@ export function apply(ctx) {
       'err.runningOnlyByDispatch': 'running 列只能通过派发进入',
       'err.unknownStatus': '未知状态: {a}',
       'err.commentEmpty': '评论不能为空',
-      'err.dispatchNotReady': '只有 ready 状态的任务可以派发',
+      'err.dispatchNotReady': '只有「待办/就绪」状态的任务可以派发',
       'err.alreadyRunning': '任务已在运行中',
       'err.noSubagents': '当前 DSH 没有挂载 subagents 服务',
       'err.noLiveAgent': '没有存活的代理会话可用于派发（请先在对话中开启一个会话）',
@@ -105,7 +106,7 @@ export function apply(ctx) {
       'out.commented': '已评论任务：{a}（id={b}）',
       'out.dispatched': '已派发看板任务：{a}（id={b}，状态=running{c}）。运行期间可用 kanban_get_task 查询进度与结果。',
       'out.dispatchedRunId': '，runId={a}',
-      'out.stopped': '已停止任务：{a}（id={b}，已移回就绪）',
+      'out.stopped': '已停止任务：{a}（id={b}，已移回待细化，不会被自动重新派发）',
       'out.deleted': '已删除任务：{a}（id={b}）',
       'out.createdBoard': '已创建看板：{a}（slug={b}）',
       'out.untitled': '（无标题）', 'out.unnamed': '（无名称）',
@@ -122,11 +123,11 @@ export function apply(ctx) {
       'tool.listBoards': '列出 DSH 看板中的全部看板及其负载：slug、名称、各列任务数与运行中任务数。用于选择看板或了解全局状态。',
       'tool.listTasks': '列出看板任务（紧凑视图，先看板再动手）。可选过滤：status（triage/todo/scheduled/ready/running/blocked/review/done/archived）、priority_min（仅返回优先级 >= 该值）、assignee（负责人/子Agent模型名）、query（标题/正文/ID 关键词）、limit（默认 50，上限 200）。按优先级降序、同优先级新卡在前。board 省略时使用第一个看板。',
       'tool.getTask': '查看单个看板任务的完整信息：标题/正文/状态/优先级/负责人/定时设置/最近评论(最多20条)/最近事件(最多20条)/最近一次运行（结果、摘要、错误、进度最后50行）。board 省略时在所有看板中查找任务 id。',
-      'tool.createTask': '在 DSH 看板中创建一张任务卡片——把工作拆进看板的入口，人会在界面「看板」标签页看到。board 省略时使用第一个看板；status 可选 triage/todo/scheduled/ready/blocked/review/done/archived（默认 todo，委派前需为 ready）；priority 为 0-9 整数，越大越优先（默认 0）；assignee 为子Agent模型名，留空表示跟随会话默认模型；schedule 为定时设置（仅 status=scheduled 时生效）：kind=interval 每 N 分钟间隔重复（需 intervalMinutes）、kind=daily 每天固定时刻（需 dailyTime，HH:MM）、可选 parentId 等待同看板父卡片完成/归档后激活。',
-      'tool.updateTask': '更新看板任务：改标题/正文/优先级/负责人(子Agent模型名)/定时设置(schedule)，或移动状态列(status)。status 移动遵循看板规则（拖离定时列会清除定时；移入 done/archived 会激活等待本卡完成的子任务）。running 任务不能直接改状态：先 kanban_stop_task 停回就绪再移动。board 省略时在所有看板中查找任务 id。patch 至少含一个字段。',
+      'tool.createTask': '在 DSH 看板中创建一张任务卡片——把工作拆进看板的入口，人会在界面「看板」标签页看到。board 省略时使用第一个看板；status 可选 triage/todo/scheduled/ready/blocked/review/done/archived（默认 todo；待办/就绪列的任务会自动派发给子代理执行，只想记录不执行的卡放 triage）；priority 为 0-9 整数，越大越优先（默认 0）；assignee 为子Agent模型名，留空表示跟随会话默认模型；schedule 为定时/门禁设置：kind=interval 每 N 分钟间隔重复（需 intervalMinutes）、kind=daily 每天固定时刻（需 dailyTime，HH:MM）、可选 parentId 设父卡片——父卡片完成/归档前该卡不会被自动派发（任何列生效）。',
+      'tool.updateTask': '更新看板任务：改标题/正文/优先级/负责人(子Agent模型名)/定时设置(schedule)，或移动状态列(status)。status 移动遵循看板规则（拖离定时列会清除定时；移入 done/archived 会激活等待本卡完成的子任务）。running 任务不能直接改状态：先 kanban_stop_task 停回待细化再移动。board 省略时在所有看板中查找任务 id。patch 至少含一个字段。',
       'tool.comment': '给看板任务追加一条评论（面向人：写在卡片上的备注/进展/遗留事项）。评论显示在看板任务详情里，并随下次派发带入子代理上下文。board 省略时在所有看板中查找任务 id。',
-      'tool.dispatch': '将 DSH 看板中「就绪」(ready) 列的任务派发给子代理执行。任务必须处于 ready 列；运行完成后自动转「完成」并回写摘要，失败或心跳超时转「阻塞」。运行期间可用 kanban_get_task 查询进度与结果；可用 kanban_stop_task 停止。可选 instructions 追加本轮补充要求（随任务正文发给子代理）。board 省略时使用第一个看板。',
-      'tool.stop': '终止正在运行(running)的看板任务：停止其子代理并把任务移回「就绪」列，之后可修改或重新派发。board 省略时在所有看板中查找任务 id。',
+      'tool.dispatch': '手动立即派发 DSH 看板中「待办/就绪」列的任务给子代理执行。这两列的任务默认由事件循环自动派发（10s 内触发；设了父卡片的等父卡片完成/归档后才派发），本工具用于提前派发或手动重试。运行完成后自动转「完成」并回写摘要，失败或心跳超时转「阻塞」。运行期间可用 kanban_get_task 查询进度与结果；可用 kanban_stop_task 停止（停止后移回「待细化」）。可选 instructions 追加本轮补充要求（随任务正文发给子代理）。board 省略时使用第一个看板。',
+      'tool.stop': '终止正在运行(running)的看板任务：停止其子代理并把任务移回「待细化」列（避免被自动派发立即重跑），之后可编辑或拖回待办/就绪重新派发。board 省略时在所有看板中查找任务 id。',
       'tool.delete': '删除看板任务（不可恢复）。若任务正在运行会先终止其子代理；等待该任务的子卡片会被激活。board 省略时在所有看板中查找任务 id。',
       'tool.createBoard': '新建一个看板。name 为显示名；slug 可选（省略时由名称自动生成），供工具与 RPC 定位看板。',
       'param.board': '看板 slug（可选，省略时使用第一个看板）。',
@@ -182,7 +183,7 @@ export function apply(ctx) {
       'err.runningOnlyByDispatch': 'Tasks enter the running column only via dispatch',
       'err.unknownStatus': 'Unknown status: {a}',
       'err.commentEmpty': 'Comment cannot be empty',
-      'err.dispatchNotReady': 'Only tasks in the ready column can be dispatched',
+      'err.dispatchNotReady': 'Only tasks in the todo/ready columns can be dispatched',
       'err.alreadyRunning': 'Task is already running',
       'err.noSubagents': 'No subagents service mounted in this DSH',
       'err.noLiveAgent': 'No live agent session available for dispatch (open a conversation first)',
@@ -244,7 +245,7 @@ export function apply(ctx) {
       'out.commented': 'Commented on task: {a} (id={b})',
       'out.dispatched': 'Dispatched kanban task: {a} (id={b}, status=running{c}). Use kanban_get_task to check progress and results while it runs.',
       'out.dispatchedRunId': ', runId={a}',
-      'out.stopped': 'Stopped task: {a} (id={b}, moved back to ready)',
+      'out.stopped': 'Stopped task: {a} (id={b}, moved back to triage so auto-dispatch will not rerun it)',
       'out.deleted': 'Deleted task: {a} (id={b})',
       'out.createdBoard': 'Created board: {a} (slug={b})',
       'out.untitled': '(untitled)', 'out.unnamed': '(unnamed)',
@@ -261,11 +262,11 @@ export function apply(ctx) {
       'tool.listBoards': 'List every board in the DSH kanban and its load: slug, name, per-column task counts, and running-task count. Use it to pick a board or survey the overall state.',
       'tool.listTasks': 'List board tasks (compact view; look at boards first, then act). Optional filters: status (triage/todo/scheduled/ready/running/blocked/review/done/archived), priority_min (only tasks with priority >= the value), assignee (subagent model name), query (title/body/ID keyword), limit (default 50, max 200). Sorted by priority descending, then newest first within a priority. Uses the first board when board is omitted.',
       'tool.getTask': 'Read one kanban task\'s full details: title/body/status/priority/assignee/schedule settings/recent comments (max 20)/recent events (max 20)/the latest run (result, summary, error, last 50 progress lines). Searches every board for the task id when board is omitted.',
-      'tool.createTask': 'Create a task card in the DSH kanban — the entry point for splitting work onto the board; people see it in the UI\'s Kanban tab. Uses the first board when board is omitted; status may be triage/todo/scheduled/ready/blocked/review/done/archived (default todo; must be ready before dispatch); priority is a 0-9 integer, higher first (default 0); assignee is the subagent model name, leave empty to follow the session default model; schedule takes effect only when status=scheduled: kind=interval repeats every N minutes (needs intervalMinutes), kind=daily fires at a fixed time each day (needs dailyTime, HH:MM), optional parentId activates after the parent card in the same board completes or is archived.',
-      'tool.updateTask': 'Update a kanban task: change title/body/priority/assignee (subagent model name)/schedule settings, or move the status column. Status moves follow board rules (leaving the scheduled column clears the schedule; moving into done/archived activates children waiting for this card). A running task cannot change status directly: first kanban_stop_task back to ready, then move it. Searches every board for the task id when board is omitted. patch needs at least one field.',
+      'tool.createTask': 'Create a task card in the DSH kanban — the entry point for splitting work onto the board; people see it in the UI\'s Kanban tab. Uses the first board when board is omitted; status may be triage/todo/scheduled/ready/blocked/review/done/archived (default todo; tasks in todo/ready auto-dispatch to a subagent — put cards you only want to record in triage); priority is a 0-9 integer, higher first (default 0); assignee is the subagent model name, leave empty to follow the session default model; schedule settings: kind=interval repeats every N minutes (needs intervalMinutes), kind=daily fires at a fixed time each day (needs dailyTime, HH:MM), optional parentId sets a parent card — the card is not auto-dispatched until the parent completes or is archived (any column).',
+      'tool.updateTask': 'Update a kanban task: change title/body/priority/assignee (subagent model name)/schedule settings, or move the status column. Status moves follow board rules (leaving the scheduled column clears the schedule; moving into done/archived activates children waiting for this card). A running task cannot change status directly: first kanban_stop_task back to triage, then move it. Searches every board for the task id when board is omitted. patch needs at least one field.',
       'tool.comment': 'Append a comment to a kanban task (meant for humans: notes/progress/follow-ups written on the card). Comments show in the kanban task details and are carried into the subagent context on the next dispatch. Searches every board for the task id when board is omitted.',
-      'tool.dispatch': 'Dispatch a task from the ready column of the DSH kanban to a subagent for execution. The task must be in the ready column; when the run finishes it turns done automatically and the summary is written back, while failure or heartbeat timeout turns it blocked. Use kanban_get_task to check progress and results while it runs; use kanban_stop_task to stop it. Optional instructions add requirements for this round (sent to the subagent with the task body). Uses the first board when board is omitted.',
-      'tool.stop': 'Terminate a running kanban task: stops its subagent and moves the task back to the ready column, after which it can be edited or dispatched again. Searches every board for the task id when board is omitted.',
+      'tool.dispatch': 'Dispatch a todo/ready task of the DSH kanban to a subagent immediately. Tasks in these two columns are auto-dispatched by the event loop by default (within ~10s; cards with a parent card wait until the parent completes or is archived), so use this tool to dispatch ahead of schedule or to retry. When the run finishes the task turns done automatically and the summary is written back; failure or heartbeat timeout turns it blocked. Use kanban_get_task to check progress and results while it runs; use kanban_stop_task to stop it (stopping moves the task back to triage). Optional instructions add requirements for this round (sent to the subagent with the task body). Uses the first board when board is omitted.',
+      'tool.stop': 'Terminate a running kanban task: stops its subagent and moves the task back to the triage column (so auto-dispatch does not immediately rerun it); after that it can be edited, or dragged back to todo/ready to dispatch again. Searches every board for the task id when board is omitted.',
       'tool.delete': 'Delete a kanban task (irrecoverable). If the task is running, its subagent is terminated first; child cards waiting for this task are activated. Searches every board for the task id when board is omitted.',
       'tool.createBoard': 'Create a board. name is the display name; slug is optional (derived from the name when omitted) and is what tools and RPC use to locate the board.',
       'param.board': 'Board slug (optional; the first board is used when omitted).',
@@ -558,6 +559,8 @@ export function apply(ctx) {
       const out = await fn()
       scheduleWrite()
       syncTimers()
+      broadcast()
+      scheduleAutoDispatch()
       return out
     })
     mutationChain = op.catch(() => {})
@@ -1090,7 +1093,7 @@ export function apply(ctx) {
       const board = findBoard(slug)
       const task = board && findTask(board, id)
       if (!task) throw new Error(t('err.taskNotFound'))
-      if (task.status !== 'ready') throw new Error(t('err.dispatchNotReady'))
+      if (task.status !== 'ready' && task.status !== 'todo') throw new Error(t('err.dispatchNotReady'))
       if (runs.has(KEY(slug, id))) throw new Error(t('err.alreadyRunning'))
       if (!subagents) throw new Error(t('err.noSubagents'))
       const initiator = (agents && typeof agents.currentInitiator === 'function' ? agents.currentInitiator() : undefined)
@@ -1167,7 +1170,8 @@ export function apply(ctx) {
     if (task.status !== 'running') throw new Error(t('err.taskNotRunning'))
     abortRun(slug, id)
     if (task.run) { task.run.ended_at = now(); task.run.outcome = 'terminated' }
-    task.status = 'ready'
+    // 停止后移回「待细化」而非「就绪」：待办/就绪列会自动派发，停回就绪会被立即重跑
+    task.status = 'triage'
     task.updated_at = now()
     pushEvent(task, 'terminated', { by })
     return task
@@ -1181,6 +1185,60 @@ export function apply(ctx) {
       return { ok: true, task }
     })
   })
+
+  // —— 自动派发：凡在「待办/就绪」列、无活跃运行、且父卡片（若有）已完成/归档的卡，自动派发 ——
+  // 触发点：事件循环 10s tick、每次 store 变更后 1s 防抖补扫、启动加载完成后补扫（重启后
+  // 列内存量同样派发）。派发失败（如尚无存活会话）留在原列下轮重试；同一错误信息只告警一次。
+  let autoDispatchTimer = null
+  let autoDispatchRunning = false
+  let lastAutoWarn = ''
+
+  function autoDispatchBlocked(board, task) {
+    const s = task.schedule
+    if (!s || !s.parentId) return false
+    const p = findTask(board, s.parentId)
+    return Boolean(p && p.status !== 'done' && p.status !== 'archived')
+  }
+
+  async function autoDispatchScan() {
+    if (store === null || autoDispatchRunning) return
+    autoDispatchRunning = true
+    try {
+      await load()
+      const candidates = []
+      for (const board of store.boards) {
+        for (const task of board.tasks) {
+          if (task.status !== 'todo' && task.status !== 'ready') continue
+          if (runs.has(KEY(board.slug, task.id))) continue
+          if (autoDispatchBlocked(board, task)) continue
+          candidates.push({ slug: board.slug, id: task.id })
+        }
+      }
+      for (const c of candidates) {
+        try {
+          await dispatchOp({ slug: c.slug, id: c.id, instructions: null })
+        } catch (err) {
+          const msg = String((err && err.message) || err)
+          if (msg !== lastAutoWarn) {
+            lastAutoWarn = msg
+            console.warn('[kanban] auto-dispatch failed:', c.id, msg)
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[kanban] auto-dispatch scan failed:', String((err && err.message) || err))
+    } finally {
+      autoDispatchRunning = false
+    }
+  }
+
+  function scheduleAutoDispatch() {
+    if (autoDispatchTimer) return
+    autoDispatchTimer = ctx.timeout(() => {
+      autoDispatchTimer = null
+      autoDispatchScan().catch(() => {})
+    }, 1000)
+  }
 
   // —— Client RPC：静态客户端经 fetch POST /kanban/rpc 调用（替代动态插件的 harness.handle/host.call）——
   const web = ctx.get('webServer')
@@ -1229,6 +1287,173 @@ export function apply(ctx) {
         res.end(JSON.stringify(out))
       },
     }))
+  }
+
+  // —— WebSocket 实时推送：/kanban/events 下行通道（零依赖，node:crypto 握手 + 手写帧层）——
+  // 任何来源的 store 变更经 broadcast() 防抖（100ms 尾部合并）后向全部连接广播全量快照；
+  // 客户端断线期间退回 5s 轮询并自动重连。协议约束：客户端帧必须 FIN + masked，仅接受
+  // close/ping（pong 静默忽略）；其余帧按 1008 关闭——与 harness 自带 downlink 的
+  // 「downlink only」语义一致。30s 服务端 ping 保活，让客户端能察觉死连接。
+  const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+  const wsClients = new Set()
+  let wsBroadcastTimer = null
+
+  function wsFrame(payloadBuf, opcode) {
+    const len = payloadBuf.length
+    let header
+    if (len < 126) {
+      header = Buffer.from([opcode, len])
+    } else if (len < 65536) {
+      header = Buffer.alloc(4)
+      header[0] = opcode
+      header[1] = 126
+      header.writeUInt16BE(len, 2)
+    } else {
+      header = Buffer.alloc(10)
+      header[0] = opcode
+      header[1] = 127
+      header.writeBigUInt64BE(BigInt(len), 2)
+    }
+    return Buffer.concat([header, payloadBuf])
+  }
+
+  function wsSend(socket, payload) {
+    const state = socket._kbnWs || (socket._kbnWs = { pending: null, flushing: false, dead: false })
+    if (state.dead) return
+    state.pending = payload
+    if (state.flushing) return
+    state.flushing = true
+    const flush = () => {
+      const next = state.pending
+      state.pending = null
+      if (next === null || state.dead) { state.flushing = false; return }
+      const frame = wsFrame(Buffer.from(next, 'utf8'), 0x81)
+      let ok = false
+      try { ok = socket.write(frame) } catch (err) { wsDestroy(socket); return }
+      if (ok) { flush(); return }
+      socket.once('drain', flush)
+    }
+    flush()
+  }
+
+  function wsDestroy(socket) {
+    const state = socket._kbnWs || (socket._kbnWs = { pending: null, flushing: false, dead: false })
+    state.dead = true
+    state.pending = null
+    wsClients.delete(socket)
+    try { socket.destroy() } catch (err) {}
+  }
+
+  function wsClose(socket, code) {
+    const buf = Buffer.alloc(2)
+    buf.writeUInt16BE(code || 1000, 0)
+    try { socket.end(wsFrame(buf, 0x88)) } catch (err) { wsDestroy(socket) }
+  }
+
+  function wsAttach(socket) {
+    const state = { pending: null, flushing: false, dead: false, buf: Buffer.alloc(0) }
+    socket._kbnWs = state
+    wsClients.add(socket)
+    socket.on('error', () => wsDestroy(socket))
+    socket.on('close', () => wsDestroy(socket))
+    socket.on('data', (chunk) => {
+      state.buf = state.buf.length === 0 ? chunk : Buffer.concat([state.buf, chunk])
+      // 增量解析帧边界；只关心控制帧（close/ping/pong），payload 除 ping 回显外一律丢弃
+      for (;;) {
+        const b = state.buf
+        if (b.length < 2) return
+        const fin = (b[0] & 0x80) !== 0
+        const opcode = b[0] & 0x0f
+        const masked = (b[1] & 0x80) !== 0
+        let len = b[1] & 0x7f
+        let off = 2
+        if (len === 126) {
+          if (b.length < 4) return
+          len = b.readUInt16BE(2)
+          off = 4
+        } else if (len === 127) {
+          if (b.length < 10) return
+          const big = b.readBigUInt64BE(2)
+          if (big > BigInt(Number.MAX_SAFE_INTEGER)) { wsClose(socket, 1009); return }
+          len = Number(big)
+          off = 10
+        }
+        if (!masked) { wsClose(socket, 1002); return }
+        if (b.length < off + 4 + len) return
+        if (!fin) { wsClose(socket, 1002); return }
+        if ((opcode & 0x8) !== 0 && len > 125) { wsClose(socket, 1002); return }
+        if (opcode === 0x8) { wsClose(socket, 1000); return }
+        if (opcode === 0x9) {
+          // ping → pong：解掩码后原样回显 payload
+          const maskKey = b.subarray(off, off + 4)
+          const payload = Buffer.from(b.subarray(off + 4, off + 4 + len))
+          for (let i = 0; i < payload.length; i++) payload[i] ^= maskKey[i & 3]
+          try { socket.write(wsFrame(payload, 0x8a)) } catch (err) { wsDestroy(socket); return }
+          state.buf = b.subarray(off + 4 + len)
+          continue
+        }
+        if (opcode === 0xa) { state.buf = b.subarray(off + 4 + len); continue }
+        wsClose(socket, 1008)
+        return
+      }
+    })
+  }
+
+  function handleWsUpgrade(req, socket, head) {
+    // 同源校验与 /kanban/rpc 一致：带 Origin 且 host 不匹配 → 403 后断开
+    const origin = String((req.headers && req.headers.origin) || '')
+    if (origin) {
+      let same = false
+      try { same = new URL(origin).host === String((req.headers && req.headers.host) || '') } catch (err) {}
+      if (!same) {
+        try { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 9\r\n\r\nforbidden') } catch (err) {}
+        return
+      }
+    }
+    const upgrade = String((req.headers && req.headers.upgrade) || '').toLowerCase()
+    const connection = String((req.headers && req.headers.connection) || '').toLowerCase()
+    const key = String((req.headers && req.headers['sec-websocket-key']) || '')
+    const version = String((req.headers && req.headers['sec-websocket-version']) || '')
+    if (upgrade !== 'websocket' || connection.indexOf('upgrade') < 0 || !key || version !== '13') {
+      try { socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n') } catch (err) {}
+      return
+    }
+    const accept = createHash('sha1').update(key + WS_GUID).digest('base64')
+    try {
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n')
+    } catch (err) {
+      wsDestroy(socket)
+      return
+    }
+    if (head && head.length > 0) socket.unshift(head)
+    wsAttach(socket)
+  }
+
+  if (web && typeof web.registerUpgrade === 'function') {
+    disposers.push(web.registerUpgrade({ path: '/kanban/events', handler: handleWsUpgrade }))
+  } else {
+    console.warn('[kanban] webServer 不支持 upgrade 路由：跳过实时推送（客户端退回轮询）')
+  }
+
+  // 30s 保活 ping：客户端据此察觉死连接并重连
+  disposers.push(ctx.interval(() => {
+    for (const socket of Array.from(wsClients)) {
+      try { socket.write(wsFrame(Buffer.alloc(0), 0x89)) } catch (err) { wsDestroy(socket) }
+    }
+  }, 30000))
+
+  // 变更广播：防抖合并为一次尾部快照推送；无连接时跳过序列化
+  function broadcast() {
+    if (store === null || wsBroadcastTimer) return
+    wsBroadcastTimer = ctx.timeout(() => {
+      wsBroadcastTimer = null
+      if (wsClients.size === 0) return
+      let payload
+      try { payload = JSON.stringify({ type: 'snapshot', boards: store.boards, now: now() }) } catch (err) { return }
+      for (const socket of Array.from(wsClients)) {
+        try { wsSend(socket, payload) } catch (err) { wsDestroy(socket) }
+      }
+    }, 100)
   }
 
   // —— Skill 引导：注册进宿主 skills 注册表（全局层，所有会话的 skill 目录可见）——
@@ -1702,6 +1927,7 @@ export function apply(ctx) {
     ticking = true
     try {
       const s = await load()
+      autoDispatchScan().catch(() => {})
       const deadline = now() - HEARTBEAT_TIMEOUT_MS
       const pending = []
       const runningSnapshots = []
@@ -1762,7 +1988,7 @@ export function apply(ctx) {
     }
   }
   disposers.push(ctx.interval(tick, LOOP_TICK_MS))
-  load().then(() => syncTimers()).catch(() => {})
+  load().then(() => { syncTimers(); scheduleAutoDispatch() }).catch(() => {})
 
   // 会话日志活动 → 记录最近活跃根 + 子运行心跳（本地 provider 的 session/event 在本进程发射）
   disposers.push(ctx.on('session/event', (session) => {
@@ -1777,17 +2003,33 @@ export function apply(ctx) {
       }
     }
     if (store === null) return
+    let touched = false
     for (const entry of runs.values()) {
       if (!entry.run || String(entry.run.id) !== sid) continue
       const board = findBoard(entry.slug)
       const task = board && findTask(board, entry.id)
       if (task && task.run && task.run.seq === entry.seq) {
         task.run.heartbeat_at = now()
+        touched = true
       }
     }
+    if (touched) broadcast()
   }))
 
   ctx.effect(() => () => {
+    for (const socket of Array.from(wsClients)) {
+      try { socket.end() } catch (err) {}
+      try { socket.destroy() } catch (err) {}
+    }
+    wsClients.clear()
+    if (wsBroadcastTimer) {
+      try { wsBroadcastTimer() } catch (err) {}
+      wsBroadcastTimer = null
+    }
+    if (autoDispatchTimer) {
+      try { autoDispatchTimer() } catch (err) {}
+      autoDispatchTimer = null
+    }
     for (const key of Array.from(runs.keys())) {
       const entry = runs.get(key)
       if (entry) {
