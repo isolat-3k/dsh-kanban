@@ -22,6 +22,128 @@ window.__ModuleLoader__.load({
       if (slots === undefined) return
       const h = React.createElement
 
+      // —— i18n：跟随 DSH 平台 locale 服务（设置页 Language 行切换，默认跟随 DSH core/browser 语言）——
+      // 词典注册进平台 registry；t(key, params) 读取当前语言文案；槽位声明 locale 后切语言自动重渲染。
+      const LOCALE_DICT = {
+        zh: {
+          'tab': '看板',
+          'status.triage': '待细化', 'status.todo': '待办', 'status.scheduled': '定时', 'status.ready': '就绪',
+          'status.running': '运行中', 'status.blocked': '阻塞', 'status.review': '审核', 'status.done': '完成', 'status.archived': '归档',
+          'time.justNow': '刚刚', 'time.minutes': '{a} 分钟', 'time.hours': '{a} 小时', 'time.days': '{a} 天',
+          'time.daysHours': '{a} 天 {b} 小时', 'time.hoursMinutes': '{a} 小时 {b} 分',
+          'time.expired': '已到期', 'time.remain': '还剩 {a}',
+          'sched.interval': '间隔重复 · 每{a}', 'sched.daily': '每天 {a}',
+          'sched.parent': '父 {a}', 'sched.waitParent': '等待父卡片完成',
+          'ui.filter': '筛选', 'ui.search': '搜索标题/正文/ID…', 'ui.noMatch': '无匹配任务',
+          'ui.newTaskHere': '在此列新建任务', 'ui.newTask': '＋ 新建任务',
+          'ui.model': '模型：{a}', 'ui.repeat': '重复任务：本轮完成后自动回排定时列',
+          'ui.priority': '优先级 {a}', 'ui.commentCount': '评论个数{a}', 'ui.running': '运行中',
+          'ui.selected': '已选 {a} 项', 'ui.move': '移动', 'ui.delete': '删除', 'ui.clearSel': '取消选择',
+          'ev.created': '创建任务（{a}）', 'ev.edited': '编辑字段：{a}',
+          'ev.movedParent': '父卡片完成 → 自动激活：{a} → {b}',
+          'ev.movedInterval': '间隔定时到点 → 自动激活：{a} → {b}',
+          'ev.movedDaily': '每日定时到点 → 自动激活：{a} → {b}',
+          'ev.movedSchedule': '本轮完成 → 回排定时列：{a} → {b}',
+          'ev.movedTimer': '旧定时到点提权：{a} → {b}',
+          'ev.moved': '移动：{a} → {b}', 'ev.commented': '添加评论',
+          'ev.dispatched': '派发执行（provider: {a}）', 'ev.completed': '执行完成',
+          'ev.terminated': '手动终止运行', 'ev.blocked': '阻塞：{a}',
+          'd.close': '关闭', 'd.title': '标题', 'd.status': '状态', 'd.model': '子Agent模型',
+          'd.defaultModel': '默认模型（跟随会话）', 'd.priority': '优先级（0-9，越大越优先）', 'd.desc': '描述',
+          'd.schedule': '定时（停放后自动激活方式）', 'd.scheduleNone': '无（仅停放，不自动激活）',
+          'd.scheduleInterval': '间隔重复（每 N 分钟）', 'd.scheduleDaily': '每天固定时刻',
+          'd.interval': '间隔（分钟，1-10080，最长 7 天）', 'd.dailyTime': '每天时刻',
+          'd.parent': '父卡片（可选：父卡片完成时激活；不设则不激活）', 'd.parentNone': '无（不设置父卡片）',
+          'd.currentSchedule': '当前定时', 'd.parentCard': '父卡片：{a}（{b}）', 'd.parentDeleted': '已删除（视为已完成）',
+          'd.nextActivation': '下次激活：{a}　{b}', 'd.save': '保存修改', 'd.run': '执行',
+          'd.providerRun': 'Provider：{a}　Run：{b}', 'd.started': '开始：{a}', 'd.ended': '　结束：{a}',
+          'd.lastActive': '最近活动：{a}', 'd.resultDone': '结果：完成', 'd.resultError': '结果：失败',
+          'd.resultTerminated': '结果：已终止', 'd.error': '错误：{a}', 'd.neverRun': '尚未执行过',
+          'd.progress': '实时进度（最近 {a} 行）', 'd.dispatchBtn': '▶ 派发给 DSH 代理执行', 'd.stopBtn': '■ 停止运行',
+          'd.runningRepeat': '重复任务：本轮完成后自动回到「定时」列等待下一轮；失败则转「阻塞」。',
+          'd.runningOnce': '已派发给 DSH 子代理执行，完成后自动流转为「完成」；失败则转「阻塞」。',
+          'd.comments': '评论（{a}）', 'd.commentPh': '写评论…（运行期间新评论不会实时送达代理）', 'd.commentBtn': '发表评论',
+          'd.events': '事件时间线（{a}）', 'd.confirmDel': '确认删除该任务？', 'd.confirmDelBtn': '确认删除',
+          'd.deleteBtn': '删除任务', 'ui.cancel': '取消',
+          'dlg.newTask': '新建任务', 'dlg.titleRequired': '请填写标题', 'dlg.initialColumn': '初始列',
+          'dlg.create': '创建', 'dlg.newBoard': '新建看板', 'dlg.boardNameRequired': '请填写看板名称',
+          'dlg.boardNamePh': '看板名称',
+          'err.unknown': '未知错误', 'err.http': 'HTTP {a}',
+          'board.partialMoveFail': '部分任务移动失败：{a}',
+          'board.loadFail': '看板数据加载失败：{a}（若持续出现，请重启 DSH 服务后刷新页面）',
+          'board.retry': '重试', 'board.loading': '加载中…', 'board.errorSuffix': '{a}（请检查插件与存储）',
+          'board.newBoardBtn': '新建看板', 'board.confirmDelBoard': '确认删除当前看板', 'board.delBoard': '删板',
+          'board.showArchived': '显示已归档列', 'board.newTaskBtn': '＋ 新任务',
+          'board.refreshTitle': '强制重读磁盘数据', 'board.refreshBtn': '刷新',
+          'board.empty': '还没有看板。点击「新建看板」创建第一个看板。',
+          'toast.done': '看板任务「{a}」已完成', 'toast.blocked': '看板任务「{a}」已阻塞',
+        },
+        en: {
+          'tab': 'Kanban',
+          'status.triage': 'Triage', 'status.todo': 'Todo', 'status.scheduled': 'Scheduled', 'status.ready': 'Ready',
+          'status.running': 'Running', 'status.blocked': 'Blocked', 'status.review': 'Review', 'status.done': 'Done', 'status.archived': 'Archived',
+          'time.justNow': 'just now', 'time.minutes': '{a} min', 'time.hours': '{a} hr', 'time.days': '{a} d',
+          'time.daysHours': '{a} d {b} hr', 'time.hoursMinutes': '{a} hr {b} min',
+          'time.expired': 'due', 'time.remain': '{a} left',
+          'sched.interval': 'repeats every {a}', 'sched.daily': 'daily at {a}',
+          'sched.parent': 'parent {a}', 'sched.waitParent': 'waiting for parent',
+          'ui.filter': 'Filter', 'ui.search': 'Search title/body/ID…', 'ui.noMatch': 'No matching tasks',
+          'ui.newTaskHere': 'New task in this column', 'ui.newTask': '＋ New task',
+          'ui.model': 'Model: {a}', 'ui.repeat': 'Repeating task: returns to the scheduled column after this round',
+          'ui.priority': 'Priority {a}', 'ui.commentCount': 'Comments {a}', 'ui.running': 'Running',
+          'ui.selected': '{a} selected', 'ui.move': 'Move', 'ui.delete': 'Delete', 'ui.clearSel': 'Clear selection',
+          'ev.created': 'Task created ({a})', 'ev.edited': 'Edited fields: {a}',
+          'ev.movedParent': 'Parent completed → auto-activated: {a} → {b}',
+          'ev.movedInterval': 'Interval due → auto-activated: {a} → {b}',
+          'ev.movedDaily': 'Daily due → auto-activated: {a} → {b}',
+          'ev.movedSchedule': 'Round done → back to scheduled: {a} → {b}',
+          'ev.movedTimer': 'Legacy timer fired: {a} → {b}',
+          'ev.moved': 'Moved: {a} → {b}', 'ev.commented': 'Comment added',
+          'ev.dispatched': 'Dispatched (provider: {a})', 'ev.completed': 'Run completed',
+          'ev.terminated': 'Run terminated manually', 'ev.blocked': 'Blocked: {a}',
+          'd.close': 'Close', 'd.title': 'Title', 'd.status': 'Status', 'd.model': 'Subagent model',
+          'd.defaultModel': 'Default model (follows session)', 'd.priority': 'Priority (0-9, higher first)', 'd.desc': 'Description',
+          'd.schedule': 'Schedule (auto-activation while parked)', 'd.scheduleNone': 'None (parked only, no auto-activation)',
+          'd.scheduleInterval': 'Repeating interval (every N min)', 'd.scheduleDaily': 'Daily at a fixed time',
+          'd.interval': 'Interval (minutes, 1-10080, max 7 days)', 'd.dailyTime': 'Daily time',
+          'd.parent': 'Parent card (optional: activates when the parent completes; none = never)', 'd.parentNone': 'None (no parent card)',
+          'd.currentSchedule': 'Current schedule', 'd.parentCard': 'Parent card: {a} ({b})', 'd.parentDeleted': 'Deleted (treated as completed)',
+          'd.nextActivation': 'Next activation: {a} {b}', 'd.save': 'Save changes', 'd.run': 'Run',
+          'd.providerRun': 'Provider: {a} Run: {b}', 'd.started': 'Started: {a}', 'd.ended': ' Ended: {a}',
+          'd.lastActive': 'Last activity: {a}', 'd.resultDone': 'Result: completed', 'd.resultError': 'Result: failed',
+          'd.resultTerminated': 'Result: terminated', 'd.error': 'Error: {a}', 'd.neverRun': 'Never run',
+          'd.progress': 'Live progress (last {a} lines)', 'd.dispatchBtn': '▶ Dispatch to DSH agent', 'd.stopBtn': '■ Stop run',
+          'd.runningRepeat': 'Repeating task: returns to the scheduled column after this round; failures turn blocked.',
+          'd.runningOnce': 'Dispatched to a DSH subagent; it turns done when finished, blocked on failure.',
+          'd.comments': 'Comments ({a})', 'd.commentPh': 'Write a comment… (new comments are not delivered live while running)', 'd.commentBtn': 'Post comment',
+          'd.events': 'Event timeline ({a})', 'd.confirmDel': 'Delete this task?', 'd.confirmDelBtn': 'Confirm delete',
+          'd.deleteBtn': 'Delete task', 'ui.cancel': 'Cancel',
+          'dlg.newTask': 'New task', 'dlg.titleRequired': 'Please enter a title', 'dlg.initialColumn': 'Initial column',
+          'dlg.create': 'Create', 'dlg.newBoard': 'New board', 'dlg.boardNameRequired': 'Please enter a board name',
+          'dlg.boardNamePh': 'Board name',
+          'err.unknown': 'Unknown error', 'err.http': 'HTTP {a}',
+          'board.partialMoveFail': 'Some tasks failed to move: {a}',
+          'board.loadFail': 'Failed to load kanban data: {a} (if this persists, restart DSH and refresh the page)',
+          'board.retry': 'Retry', 'board.loading': 'Loading…', 'board.errorSuffix': '{a} (check the plugin and storage)',
+          'board.newBoardBtn': 'New board', 'board.confirmDelBoard': 'Confirm delete current board', 'board.delBoard': 'Delete board',
+          'board.showArchived': 'Show archived column', 'board.newTaskBtn': '＋ New task',
+          'board.refreshTitle': 'Force reload from disk', 'board.refreshBtn': 'Refresh',
+          'board.empty': 'No boards yet. Click "New board" to create the first one.',
+          'toast.done': 'Kanban task "{a}" completed', 'toast.blocked': 'Kanban task "{a}" blocked',
+        },
+      }
+      const locale = ctx.get('locale')
+      const navLang = (typeof navigator !== 'undefined' && navigator.language && String(navigator.language).slice(0, 2).toLowerCase() === 'en') ? 'en' : 'zh'
+      const t = (locale && typeof locale.bind === 'function')
+        ? locale.bind('kanban')
+        : (key, params) => {
+            const dict = LOCALE_DICT[navLang] || LOCALE_DICT.zh
+            const raw = (dict && dict[key] !== undefined) ? dict[key] : key
+            if (!params) return raw
+            return String(raw).replace(/\{([a-z])\}/g, (m, k) => (params[k] === undefined ? m : String(params[k])))
+          }
+      const uiLang = () => (locale && typeof locale.getLocale === 'function' && locale.getLocale().active === 'en' ? 'en' : 'zh')
+
       const CSS = [
         '.kbn-view { flex:1; display:flex; flex-direction:column; min-height:0; height:100%; background:var(--dsw-alias-bg-base); }',
         '.kbn-body { flex:1; display:flex; flex-direction:column; min-height:0; position:relative; }',
@@ -115,18 +237,18 @@ window.__ModuleLoader__.load({
       ].join('\n')
 
       const STATUSES = [
-        { id: 'triage', label: '待细化', tone: 'var(--dsw-alias-label-secondary)' },
-        { id: 'todo', label: '待办', tone: 'var(--dsw-alias-label-secondary)' },
-        { id: 'scheduled', label: '定时', tone: '#a78bfa' },
-        { id: 'ready', label: '就绪', tone: '#60a5fa' },
-        { id: 'running', label: '运行中', tone: '#34d399' },
-        { id: 'blocked', label: '阻塞', tone: '#f87171' },
-        { id: 'review', label: '审核', tone: '#fbbf24' },
-        { id: 'done', label: '完成', tone: 'var(--dsw-alias-state-success-primary)' },
-        { id: 'archived', label: '归档', tone: 'var(--dsw-alias-label-secondary)' },
+        { id: 'triage', tone: 'var(--dsw-alias-label-secondary)' },
+        { id: 'todo', tone: 'var(--dsw-alias-label-secondary)' },
+        { id: 'scheduled', tone: '#a78bfa' },
+        { id: 'ready', tone: '#60a5fa' },
+        { id: 'running', tone: '#34d399' },
+        { id: 'blocked', tone: '#f87171' },
+        { id: 'review', tone: '#fbbf24' },
+        { id: 'done', tone: 'var(--dsw-alias-state-success-primary)' },
+        { id: 'archived', tone: 'var(--dsw-alias-label-secondary)' },
       ]
       const statusOf = (id) => {
-        for (const s of STATUSES) if (s.id === id) return s
+        for (const s of STATUSES) if (s.id === id) return { id: s.id, label: t('status.' + s.id), tone: s.tone }
         return { id, label: id, tone: 'var(--dsw-alias-label-secondary)' }
       }
       const prioTier = (p) => (p >= 7 ? 'p3' : p >= 4 ? 'p2' : p >= 1 ? 'p1' : 'p0')
@@ -140,11 +262,11 @@ window.__ModuleLoader__.load({
         if (!ts) return ''
         const d = Date.now() - ts
         const m = Math.floor(d / 60000)
-        if (m < 1) return '刚刚'
-        if (m < 60) return m + ' 分钟'
+        if (m < 1) return t('time.justNow')
+        if (m < 60) return t('time.minutes', { a: m })
         const hr = Math.floor(m / 60)
-        if (hr < 24) return hr + ' 小时'
-        return Math.floor(hr / 24) + ' 天'
+        if (hr < 24) return t('time.hours', { a: hr })
+        return t('time.days', { a: Math.floor(hr / 24) })
       }
       const fmtTime = (ts) => {
         if (!ts) return ''
@@ -163,20 +285,20 @@ window.__ModuleLoader__.load({
         if (m >= 1440) {
           const d = Math.floor(m / 1440)
           const h = Math.round((m % 1440) / 60)
-          return h > 0 ? d + ' 天 ' + h + ' 小时' : d + ' 天'
+          return h > 0 ? t('time.daysHours', { a: d, b: h }) : t('time.days', { a: d })
         }
         if (m >= 60) {
           const h = Math.floor(m / 60)
           const mm = m % 60
-          return mm > 0 ? h + ' 小时 ' + mm + ' 分' : h + ' 小时'
+          return mm > 0 ? t('time.hoursMinutes', { a: h, b: mm }) : t('time.hours', { a: h })
         }
-        return m + ' 分钟'
+        return t('time.minutes', { a: m })
       }
       const fmtRemain = (ts) => {
         if (!ts) return ''
         const ms = ts - Date.now()
-        if (ms <= 0) return '已到期'
-        return '还剩 ' + fmtMinutes(Math.floor(ms / 60000))
+        if (ms <= 0) return t('time.expired')
+        return t('time.remain', { a: fmtMinutes(Math.floor(ms / 60000)) })
       }
       const fmtAbs = (ts) => {
         if (!ts) return ''
@@ -186,8 +308,8 @@ window.__ModuleLoader__.load({
       }
       const scheduleKindLabel = (s) => {
         if (!s) return ''
-        if (s.kind === 'interval') return '间隔重复 · 每' + fmtMinutes(s.intervalMinutes)
-        if (s.kind === 'daily') return '每天 ' + toHM(s.dailyMinutes)
+        if (s.kind === 'interval') return t('sched.interval', { a: fmtMinutes(s.intervalMinutes) })
+        if (s.kind === 'daily') return t('sched.daily', { a: toHM(s.dailyMinutes) })
         return ''
       }
       const scheduleChip = (s) => {
@@ -196,9 +318,9 @@ window.__ModuleLoader__.load({
         const parts = []
         const kl = scheduleKindLabel(s)
         if (kl) parts.push(kl)
-        if (s.parentId) parts.push('父 ' + shortId(s.parentId))
+        if (s.parentId) parts.push(t('sched.parent', { a: shortId(s.parentId) }))
         if (typeof s.nextAt === 'number') parts.push(fmtRemain(s.nextAt) + ' · ' + fmtAbs(s.nextAt))
-        if (parts.length === 0 && !s.kind && s.parentId) parts.push('等待父卡片完成')
+        if (parts.length === 0 && !s.kind && s.parentId) parts.push(t('sched.waitParent'))
         return parts.join('　')
       }
       const defaultSchedule = (lane) => (lane === 'scheduled'
@@ -227,13 +349,13 @@ window.__ModuleLoader__.load({
         return fetch('/kanban/rpc', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ method, args: args || {} }),
+          body: JSON.stringify({ method, args: args || {}, lang: uiLang() }),
         }).then(res => {
-          if (!res.ok) throw new Error('HTTP ' + res.status)
+          if (!res.ok) throw new Error(t('err.http', { a: res.status }))
           return res.json()
         }).then(res => {
           if (res && res.ok === true) return res.data
-          throw new Error((res && res.error) || '未知错误')
+          throw new Error((res && res.error) || t('err.unknown'))
         })
       }
 
@@ -245,7 +367,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'kbn-lane-label' }, meta.label),
           h('span', { className: 'kbn-lane-count' }, props.laneTasks.length),
           h('span', { className: 'kbn-lane-head-spacer' }),
-          h('button', { className: 'kbn-icon-btn', title: '筛选', onClick: e => { e.stopPropagation(); props.onToggleFilter(props.lane.id) } }, '⌕'),
+          h('button', { className: 'kbn-icon-btn', title: t('ui.filter'), onClick: e => { e.stopPropagation(); props.onToggleFilter(props.lane.id) } }, '⌕'),
         )
         if (props.isCollapsed) {
           return h('div', { className: 'kbn-lane-rail', onClick: () => props.onToggleCollapse(props.lane.id) },
@@ -272,12 +394,12 @@ window.__ModuleLoader__.load({
           head,
           props.filterOpen ? h('input', {
             className: 'kbn-input kbn-filter',
-            placeholder: '搜索标题/正文/ID…',
+            placeholder: t('ui.search'),
             value: props.filterText,
             onChange: e => props.onFilterChange(props.lane.id, e.target.value),
           }) : null,
           h('div', { className: 'kbn-lane-body' },
-            props.shown.length === 0 && props.filterText.trim().length > 0 ? h('div', { className: 'kbn-lane-empty' }, '无匹配任务') : null,
+            props.shown.length === 0 && props.filterText.trim().length > 0 ? h('div', { className: 'kbn-lane-empty' }, t('ui.noMatch')) : null,
             props.shown.map(t => h(Card, {
               key: t.id,
               task: t,
@@ -285,47 +407,47 @@ window.__ModuleLoader__.load({
               onOpen: props.onOpenTask,
               onToggleSelect: props.onToggleSelect,
             })),
-            h('button', { className: 'kbn-card-new', title: '在此列新建任务', onClick: () => props.onNewTask(props.lane.id) }, '＋ 新建任务'),
+            h('button', { className: 'kbn-card-new', title: t('ui.newTaskHere'), onClick: () => props.onNewTask(props.lane.id) }, t('ui.newTask')),
           ),
         )
       }
 
       function Card(props) {
         const [dragging, setDragging] = React.useState(false)
-        const t = props.task
-        const meta = statusOf(t.status)
+        const task = props.task
+        const meta = statusOf(task.status)
         return h('div', {
           className: 'kbn-card'
             + (props.selected ? ' kbn-card-sel' : '')
             + (dragging ? ' kbn-card-drag' : '')
-            + (t.status === 'running' ? ' kbn-card-running' : ''),
+            + (task.status === 'running' ? ' kbn-card-running' : ''),
           style: { borderLeftColor: meta.tone },
           draggable: true,
           onClick: e => {
             if (e.ctrlKey || e.metaKey) {
               e.stopPropagation()
-              props.onToggleSelect(t.id)
+              props.onToggleSelect(task.id)
             } else {
-              props.onOpen(t.id)
+              props.onOpen(task.id)
             }
           },
           onDragStart: e => {
-            e.dataTransfer.setData('text/plain', t.id)
+            e.dataTransfer.setData('text/plain', task.id)
             e.dataTransfer.effectAllowed = 'move'
             setDragging(true)
           },
           onDragEnd: () => setDragging(false),
         },
-          h('div', { className: 'kbn-card-title' }, t.title),
-          t.body ? h('div', { className: 'kbn-card-body' }, cap(t.body, 160)) : null,
+          h('div', { className: 'kbn-card-title' }, task.title),
+          task.body ? h('div', { className: 'kbn-card-body' }, cap(task.body, 160)) : null,
           h('div', { className: 'kbn-card-foot' },
-            t.assignee ? h('span', { className: 'kbn-chip', title: '模型：' + t.assignee }, t.assignee) : null,
-            t.status === 'scheduled' && t.schedule ? h('span', { className: 'kbn-chip', title: scheduleChip(t.schedule) }, scheduleChip(t.schedule)) : null,
-            t.status !== 'scheduled' && t.schedule && t.schedule.kind ? h('span', { className: 'kbn-chip', title: '重复任务：本轮完成后自动回排定时列' }, scheduleKindLabel(t.schedule)) : null,
-            h('span', { className: 'kbn-prio ' + prioTier(t.priority), title: '优先级 ' + t.priority }, String(t.priority)),
-            t.comments && t.comments.length > 0 ? h('span', { className: 'kbn-chip' }, '评论个数' + t.comments.length) : null,
-            t.status === 'running' ? h('span', { className: 'kbn-run-chip' }, '运行中') : null,
-            h('span', { className: 'kbn-age' }, fmtAge(t.created_at)),
+            task.assignee ? h('span', { className: 'kbn-chip', title: t('ui.model', { a: task.assignee }) }, task.assignee) : null,
+            task.status === 'scheduled' && task.schedule ? h('span', { className: 'kbn-chip', title: scheduleChip(task.schedule) }, scheduleChip(task.schedule)) : null,
+            task.status !== 'scheduled' && task.schedule && task.schedule.kind ? h('span', { className: 'kbn-chip', title: t('ui.repeat') }, scheduleKindLabel(task.schedule)) : null,
+            h('span', { className: 'kbn-prio ' + prioTier(task.priority), title: t('ui.priority', { a: task.priority }) }, String(task.priority)),
+            task.comments && task.comments.length > 0 ? h('span', { className: 'kbn-chip' }, t('ui.commentCount', { a: task.comments.length })) : null,
+            task.status === 'running' ? h('span', { className: 'kbn-run-chip' }, t('ui.running')) : null,
+            h('span', { className: 'kbn-age' }, fmtAge(task.created_at)),
           ),
         )
       }
@@ -334,36 +456,38 @@ window.__ModuleLoader__.load({
         const [status, setStatus] = React.useState('ready')
         const count = Object.keys(props.selected).length
         return h('div', { className: 'kbn-bulkbar' },
-          h('span', { className: 'kbn-bulkbar-count' }, '已选 ' + count + ' 项'),
-          h('button', { className: 'kbn-btn', onClick: () => props.onMove('ready') }, '就绪'),
-          h('button', { className: 'kbn-btn', onClick: () => props.onMove('done') }, '完成'),
+          h('span', { className: 'kbn-bulkbar-count' }, t('ui.selected', { a: count })),
+          h('button', { className: 'kbn-btn', onClick: () => props.onMove('ready') }, statusOf('ready').label),
+          h('button', { className: 'kbn-btn', onClick: () => props.onMove('done') }, statusOf('done').label),
           h('select', { className: 'kbn-input kbn-select', value: status, onChange: e => setStatus(e.target.value) },
-            STATUSES.filter(s => s.id !== 'running').map(s => h('option', { key: s.id, value: s.id }, s.label)),
+            STATUSES.filter(s => s.id !== 'running').map(s => h('option', { key: s.id, value: s.id }, statusOf(s.id).label)),
           ),
-          h('button', { className: 'kbn-btn', onClick: () => props.onMove(status) }, '移动'),
-          h('button', { className: 'kbn-btn kbn-btn-danger', onClick: () => props.onDelete() }, '删除'),
-          h('button', { className: 'kbn-btn', onClick: () => props.onClear() }, '取消选择'),
+          h('button', { className: 'kbn-btn', onClick: () => props.onMove(status) }, t('ui.move')),
+          h('button', { className: 'kbn-btn kbn-btn-danger', onClick: () => props.onDelete() }, t('ui.delete')),
+          h('button', { className: 'kbn-btn', onClick: () => props.onClear() }, t('ui.clearSel')),
         )
       }
 
       function eventText(ev) {
         const p = ev.payload || {}
-        if (ev.kind === 'created') return '创建任务（' + (p.status || '') + '）'
-        if (ev.kind === 'edited') return '编辑字段：' + (p.fields ? p.fields.join('、') : '')
+        if (ev.kind === 'created') return t('ev.created', { a: (p.status || '') })
+        if (ev.kind === 'edited') return t('ev.edited', { a: (p.fields ? p.fields.join('、') : '') })
         if (ev.kind === 'moved') {
           const by = p.by
-          if (by === 'parent') return '父卡片完成 → 自动激活：' + (p.from || '?') + ' → ' + (p.to || '?')
-          if (by === 'interval') return '间隔定时到点 → 自动激活：' + (p.from || '?') + ' → ' + (p.to || '?')
-          if (by === 'daily') return '每日定时到点 → 自动激活：' + (p.from || '?') + ' → ' + (p.to || '?')
-          if (by === 'schedule') return '本轮完成 → 回排定时列：' + (p.from || '?') + ' → ' + (p.to || '?')
-          if (by === 'timer') return '旧定时到点提权：' + (p.from || '?') + ' → ' + (p.to || '?')
-          return '移动：' + (p.from || '?') + ' → ' + (p.to || '?')
+          const from = p.from || '?'
+          const to = p.to || '?'
+          if (by === 'parent') return t('ev.movedParent', { a: from, b: to })
+          if (by === 'interval') return t('ev.movedInterval', { a: from, b: to })
+          if (by === 'daily') return t('ev.movedDaily', { a: from, b: to })
+          if (by === 'schedule') return t('ev.movedSchedule', { a: from, b: to })
+          if (by === 'timer') return t('ev.movedTimer', { a: from, b: to })
+          return t('ev.moved', { a: from, b: to })
         }
-        if (ev.kind === 'commented') return '添加评论'
-        if (ev.kind === 'dispatched') return '派发执行（provider: ' + (p.provider || '?') + '）'
-        if (ev.kind === 'completed') return '执行完成'
-        if (ev.kind === 'terminated') return '手动终止运行'
-        if (ev.kind === 'blocked') return '阻塞：' + (p.reason || '')
+        if (ev.kind === 'commented') return t('ev.commented')
+        if (ev.kind === 'dispatched') return t('ev.dispatched', { a: (p.provider || '?') })
+        if (ev.kind === 'completed') return t('ev.completed')
+        if (ev.kind === 'terminated') return t('ev.terminated')
+        if (ev.kind === 'blocked') return t('ev.blocked', { a: (p.reason || '') })
         return ev.kind
       }
 
@@ -420,16 +544,16 @@ window.__ModuleLoader__.load({
           h('div', { className: 'kbn-drawer-head' },
             h('span', { className: 'kbn-lane-rail-bar', style: { background: meta.tone, marginTop: 0 } }),
             h('span', { className: 'kbn-drawer-title' }, meta.label + ' · ' + task.id),
-            h('button', { className: 'kbn-icon-btn', title: '关闭', onClick: () => props.onClose() }, '✕'),
+            h('button', { className: 'kbn-icon-btn', title: t('d.close'), onClick: () => props.onClose() }, '✕'),
           ),
           h('div', { className: 'kbn-drawer-scroll' },
             err ? h('div', { className: 'kbn-error' }, err) : null,
             h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '标题'),
+              h('span', { className: 'kbn-field-label' }, t('d.title')),
               h('input', { className: 'kbn-input', value: title, onChange: e => setTitle(e.target.value) }),
             ),
             h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '状态'),
+              h('span', { className: 'kbn-field-label' }, t('d.status')),
               h('div', { className: 'kbn-status-view', style: { '--tone': meta.tone } },
                 h('span', { className: 'kbn-status-dot' }),
                 meta.label,
@@ -437,54 +561,54 @@ window.__ModuleLoader__.load({
             ),
             h('div', { className: 'kbn-field-row' },
               h('div', { className: 'kbn-field', style: { flex: 1 } },
-                h('span', { className: 'kbn-field-label' }, '子Agent模型'),
+                h('span', { className: 'kbn-field-label' }, t('d.model')),
                 h('select', { className: 'kbn-input kbn-select', value: assignee, onChange: e => setAssignee(e.target.value) },
-                  h('option', { value: '' }, '默认模型（跟随会话）'),
+                  h('option', { value: '' }, t('d.defaultModel')),
                   assignee && modelOptions.indexOf(assignee) < 0 ? h('option', { value: assignee }, assignee) : null,
                   modelOptions.map(m => h('option', { key: m, value: m }, m)),
                 ),
               ),
               h('div', { className: 'kbn-field' },
-                h('span', { className: 'kbn-field-label' }, '优先级（0-9，越大越优先）'),
+                h('span', { className: 'kbn-field-label' }, t('d.priority')),
                 h('input', { className: 'kbn-input', type: 'number', min: 0, max: 9, value: String(priority), onChange: e => setPriority(clampNum(e.target.value, 0, 9)) }),
               ),
             ),
             h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '描述'),
+              h('span', { className: 'kbn-field-label' }, t('d.desc')),
               h('textarea', { className: 'kbn-input kbn-textarea', rows: 6, value: body, onChange: e => setBody(e.target.value) }),
             ),
             h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '定时（停放后自动激活方式）'),
+              h('span', { className: 'kbn-field-label' }, t('d.schedule')),
               h('select', { className: 'kbn-input kbn-select', value: sched.kind, onChange: e => setSched({ ...sched, kind: e.target.value }) },
-                h('option', { value: 'none' }, '无（仅停放，不自动激活）'),
-                h('option', { value: 'interval' }, '间隔重复（每 N 分钟）'),
-                h('option', { value: 'daily' }, '每天固定时刻'),
+                h('option', { value: 'none' }, t('d.scheduleNone')),
+                h('option', { value: 'interval' }, t('d.scheduleInterval')),
+                h('option', { value: 'daily' }, t('d.scheduleDaily')),
               ),
             ),
             sched.kind === 'interval' ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '间隔（分钟，1-10080，最长 7 天）'),
+              h('span', { className: 'kbn-field-label' }, t('d.interval')),
               h('input', { className: 'kbn-input', type: 'number', min: 1, max: 10080, value: String(sched.intervalMinutes), onChange: e => setSched({ ...sched, intervalMinutes: e.target.value }) }),
             ) : null,
             sched.kind === 'daily' ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '每天时刻'),
+              h('span', { className: 'kbn-field-label' }, t('d.dailyTime')),
               h('input', { className: 'kbn-input', type: 'time', value: sched.dailyTime, onChange: e => setSched({ ...sched, dailyTime: e.target.value }) }),
             ) : null,
             h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '父卡片（可选：父卡片完成时激活；不设则不激活）'),
+              h('span', { className: 'kbn-field-label' }, t('d.parent')),
               h('select', { className: 'kbn-input kbn-select', value: sched.parentId, onChange: e => setSched({ ...sched, parentId: e.target.value }) },
-                h('option', { value: '' }, '无（不设置父卡片）'),
-                (props.tasks || []).filter(t => t.id !== task.id).map(t => h('option', { key: t.id, value: t.id }, t.title + '（' + statusOf(t.status).label + '）')),
+                h('option', { value: '' }, t('d.parentNone')),
+                (props.tasks || []).filter(x => x.id !== task.id).map(x => h('option', { key: x.id, value: x.id }, x.title + '（' + statusOf(x.status).label + '）')),
               ),
             ),
             task.schedule && (task.schedule.kind || task.schedule.parentId) ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '当前定时'),
+              h('span', { className: 'kbn-field-label' }, t('d.currentSchedule')),
               h('div', { className: 'kbn-run-info' },
-                scheduleKindLabel(task.schedule) || '等待父卡片完成',
-                task.schedule.parentId ? h('div', null, '父卡片：' + shortId(task.schedule.parentId) + '（' + (() => {
+                scheduleKindLabel(task.schedule) || t('sched.waitParent'),
+                task.schedule.parentId ? h('div', null, t('d.parentCard', { a: shortId(task.schedule.parentId), b: (() => {
                   const p = (props.tasks || []).find(x => x.id === task.schedule.parentId)
-                  return p ? statusOf(p.status).label : '已删除（视为已完成）'
-                })() + '）') : null,
-                typeof task.schedule.nextAt === 'number' ? h('div', null, '下次激活：' + fmtRemain(task.schedule.nextAt) + '　' + fmtAbs(task.schedule.nextAt)) : null,
+                  return p ? statusOf(p.status).label : t('d.parentDeleted')
+                })() })) : null,
+                typeof task.schedule.nextAt === 'number' ? h('div', null, t('d.nextActivation', { a: fmtRemain(task.schedule.nextAt), b: fmtAbs(task.schedule.nextAt) })) : null,
               ),
             ) : null,
             h('button', {
@@ -494,21 +618,21 @@ window.__ModuleLoader__.load({
                 slug: props.slug, id: task.id,
                 patch: { title: title.trim(), body, assignee, priority, schedule: schedulePayload(sched) },
               })),
-            }, '保存修改'),
+            }, t('d.save')),
             h('div', { className: 'kbn-runbox' },
-              h('div', { className: 'kbn-section-title', style: { marginBottom: 0 } }, '执行'),
+              h('div', { className: 'kbn-section-title', style: { marginBottom: 0 } }, t('d.run')),
               task.run ? h('div', { className: 'kbn-run-info' },
-                h('div', null, 'Provider：' + (task.run.provider || '?') + '　Run：' + (task.run.runId || '?')),
-                h('div', null, '开始：' + fmtTime(task.run.started_at) + (task.run.ended_at ? '　结束：' + fmtTime(task.run.ended_at) : '')),
-                task.run.heartbeat_at ? h('div', null, '最近活动：' + fmtTime(task.run.heartbeat_at)) : null,
-                task.run.outcome === 'done' ? h('div', { className: 'kbn-run-ok' }, '结果：完成') : null,
-                task.run.outcome === 'error' ? h('div', { className: 'kbn-run-bad' }, '结果：失败') : null,
-                task.run.outcome === 'terminated' ? h('div', null, '结果：已终止') : null,
+                h('div', null, t('d.providerRun', { a: (task.run.provider || '?'), b: (task.run.runId || '?') })),
+                h('div', null, t('d.started', { a: fmtTime(task.run.started_at) }) + (task.run.ended_at ? t('d.ended', { a: fmtTime(task.run.ended_at) }) : '')),
+                task.run.heartbeat_at ? h('div', null, t('d.lastActive', { a: fmtTime(task.run.heartbeat_at) })) : null,
+                task.run.outcome === 'done' ? h('div', { className: 'kbn-run-ok' }, t('d.resultDone')) : null,
+                task.run.outcome === 'error' ? h('div', { className: 'kbn-run-bad' }, t('d.resultError')) : null,
+                task.run.outcome === 'terminated' ? h('div', null, t('d.resultTerminated')) : null,
                 task.run.summary ? h('div', { className: 'kbn-run-summary' }, task.run.summary) : null,
-                task.run.error ? h('div', { className: 'kbn-run-bad' }, '错误：' + task.run.error) : null,
-              ) : h('div', { className: 'kbn-run-info' }, '尚未执行过'),
+                task.run.error ? h('div', { className: 'kbn-run-bad' }, t('d.error', { a: task.run.error })) : null,
+              ) : h('div', { className: 'kbn-run-info' }, t('d.neverRun')),
               task.run && Array.isArray(task.run.progress) && task.run.progress.length > 0 ? h('div', null,
-                h('div', { className: 'kbn-section-title', style: { marginBottom: 4 } }, '实时进度（最近 ' + task.run.progress.length + ' 行）'),
+                h('div', { className: 'kbn-section-title', style: { marginBottom: 4 } }, t('d.progress', { a: task.run.progress.length })),
                 h('div', { className: 'kbn-run-summary' }, task.run.progress.join('\n')),
               ) : null,
               (task.status !== 'running' && task.status !== 'archived') ? h('button', {
@@ -520,19 +644,19 @@ window.__ModuleLoader__.load({
                     : call('moveTask', { slug: props.slug, id: task.id, status: 'ready' })
                   return prepare.then(() => call('dispatch', { slug: props.slug, id: task.id }))
                 }),
-              }, '▶ 派发给 DSH 代理执行') : null,
+              }, t('d.dispatchBtn')) : null,
               task.status === 'running' ? h('button', {
                 className: 'kbn-btn kbn-btn-stop',
                 disabled: busy,
                 onClick: () => act(() => call('terminate', { slug: props.slug, id: task.id })),
-              }, '■ 停止运行') : null,
+              }, t('d.stopBtn')) : null,
               task.status === 'running' ? h('div', { className: 'kbn-run-hint' },
                 task.schedule && task.schedule.kind
-                  ? '重复任务：本轮完成后自动回到「定时」列等待下一轮；失败则转「阻塞」。'
-                  : '已派发给 DSH 子代理执行，完成后自动流转为「完成」；失败则转「阻塞」。') : null,
+                  ? t('d.runningRepeat')
+                  : t('d.runningOnce')) : null,
             ),
             h('div', { className: 'kbn-comments' },
-              h('div', { className: 'kbn-section-title' }, '评论（' + ((task.comments || []).length) + '）'),
+              h('div', { className: 'kbn-section-title' }, t('d.comments', { a: (task.comments || []).length })),
               (task.comments || []).map(c => h('div', { key: c.id, className: 'kbn-comment' },
                 h('div', { className: 'kbn-comment-meta' }, (c.author || 'user') + ' · ' + fmtTime(c.created_at)),
                 h('div', { className: 'kbn-comment-body' }, c.body),
@@ -541,7 +665,7 @@ window.__ModuleLoader__.load({
                 h('textarea', {
                   className: 'kbn-input kbn-textarea',
                   rows: 3,
-                  placeholder: '写评论…（运行期间新评论不会实时送达代理）',
+                  placeholder: t('d.commentPh'),
                   value: comment,
                   onChange: e => setComment(e.target.value),
                 }),
@@ -553,11 +677,11 @@ window.__ModuleLoader__.load({
                     if (!text) return
                     act(() => call('addComment', { slug: props.slug, id: task.id, body: text }).then(() => setComment('')))
                   },
-                }, '发表评论'),
+                }, t('d.commentBtn')),
               ),
             ),
             h('div', { className: 'kbn-events' },
-              h('div', { className: 'kbn-section-title' }, '事件时间线（' + ((task.events || []).length) + '）'),
+              h('div', { className: 'kbn-section-title' }, t('d.events', { a: (task.events || []).length })),
               (task.events || []).slice().reverse().map(ev => h('div', { key: ev.id, className: 'kbn-event' },
                 h('span', { className: 'kbn-event-meta' }, fmtTime(ev.created_at)),
                 h('span', { className: 'kbn-event-body' }, eventText(ev)),
@@ -565,11 +689,11 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('div', { className: 'kbn-drawer-foot' },
-            confirmDel ? h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, '确认删除该任务？') : null,
+            confirmDel ? h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' } }, t('d.confirmDel')) : null,
             confirmDel
-              ? h('button', { className: 'kbn-btn kbn-btn-danger', disabled: busy, onClick: () => { act(() => call('deleteTask', { slug: props.slug, id: task.id }).then(() => props.onClose())); } }, '确认删除')
-              : h('button', { className: 'kbn-btn kbn-btn-danger', onClick: () => setConfirmDel(true) }, '删除任务'),
-            confirmDel ? h('button', { className: 'kbn-btn', onClick: () => setConfirmDel(false) }, '取消') : null,
+              ? h('button', { className: 'kbn-btn kbn-btn-danger', disabled: busy, onClick: () => { act(() => call('deleteTask', { slug: props.slug, id: task.id }).then(() => props.onClose())); } }, t('d.confirmDelBtn'))
+              : h('button', { className: 'kbn-btn kbn-btn-danger', onClick: () => setConfirmDel(true) }, t('d.deleteBtn')),
+            confirmDel ? h('button', { className: 'kbn-btn', onClick: () => setConfirmDel(false) }, t('ui.cancel')) : null,
           ),
         )
       }
@@ -595,7 +719,7 @@ window.__ModuleLoader__.load({
         }, [])
 
         function submit() {
-          if (!title.trim()) { setErr('请填写标题'); return }
+          if (!title.trim()) { setErr(t('dlg.titleRequired')); return }
           setBusy(true)
           setErr(null)
           call('createTask', {
@@ -608,65 +732,65 @@ window.__ModuleLoader__.load({
 
         return h('div', { className: 'kbn-modal-mask', onClick: e => { if (e.target === e.currentTarget) props.onClose() } },
           h('div', { className: 'kbn-modal' },
-            h('div', { className: 'kbn-modal-title' }, '新建任务'),
+            h('div', { className: 'kbn-modal-title' }, t('dlg.newTask')),
             err ? h('div', { className: 'kbn-error' }, err) : null,
             h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '标题'),
+              h('span', { className: 'kbn-field-label' }, t('d.title')),
               h('input', { className: 'kbn-input', autoFocus: true, value: title, onChange: e => setTitle(e.target.value), onKeyDown: e => { if (e.key === 'Enter') submit() } }),
             ),
             h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '描述'),
+              h('span', { className: 'kbn-field-label' }, t('d.desc')),
               h('textarea', { className: 'kbn-input kbn-textarea', rows: 5, value: body, onChange: e => setBody(e.target.value) }),
             ),
             h('div', { className: 'kbn-field-row' },
               h('div', { className: 'kbn-field', style: { flex: 1 } },
-                h('span', { className: 'kbn-field-label' }, '子Agent模型'),
+                h('span', { className: 'kbn-field-label' }, t('d.model')),
                 h('select', { className: 'kbn-input kbn-select', value: assignee, onChange: e => setAssignee(e.target.value) },
-                  h('option', { value: '' }, '默认模型（跟随会话）'),
+                  h('option', { value: '' }, t('d.defaultModel')),
                   modelOptions.map(m => h('option', { key: m, value: m }, m)),
                 ),
               ),
               h('div', { className: 'kbn-field' },
-                h('span', { className: 'kbn-field-label' }, '优先级（0-9，越大越优先）'),
+                h('span', { className: 'kbn-field-label' }, t('d.priority')),
                 h('input', { className: 'kbn-input', type: 'number', min: 0, max: 9, value: String(priority), onChange: e => setPriority(clampNum(e.target.value, 0, 9)) }),
               ),
             ),
             h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '初始列'),
+              h('span', { className: 'kbn-field-label' }, t('dlg.initialColumn')),
               h('select', {
                 className: 'kbn-input kbn-select',
                 value: status,
                 onChange: e => setStatus(e.target.value),
               },
-                STATUSES.filter(s => s.id !== 'running').map(s => h('option', { key: s.id, value: s.id }, s.label)),
+                STATUSES.filter(s => s.id !== 'running').map(s => h('option', { key: s.id, value: s.id }, statusOf(s.id).label)),
               ),
             ),
             status === 'scheduled' ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '定时（停放后自动激活方式）'),
+              h('span', { className: 'kbn-field-label' }, t('d.schedule')),
               h('select', { className: 'kbn-input kbn-select', value: sched.kind, onChange: e => setSched({ ...sched, kind: e.target.value }) },
-                h('option', { value: 'none' }, '无（仅停放，不自动激活）'),
-                h('option', { value: 'interval' }, '间隔重复（每 N 分钟）'),
-                h('option', { value: 'daily' }, '每天固定时刻'),
+                h('option', { value: 'none' }, t('d.scheduleNone')),
+                h('option', { value: 'interval' }, t('d.scheduleInterval')),
+                h('option', { value: 'daily' }, t('d.scheduleDaily')),
               ),
             ) : null,
             status === 'scheduled' && sched.kind === 'interval' ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '间隔（分钟，1-10080，最长 7 天）'),
+              h('span', { className: 'kbn-field-label' }, t('d.interval')),
               h('input', { className: 'kbn-input', type: 'number', min: 1, max: 10080, value: String(sched.intervalMinutes), onChange: e => setSched({ ...sched, intervalMinutes: e.target.value }) }),
             ) : null,
             status === 'scheduled' && sched.kind === 'daily' ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '每天时刻'),
+              h('span', { className: 'kbn-field-label' }, t('d.dailyTime')),
               h('input', { className: 'kbn-input', type: 'time', value: sched.dailyTime, onChange: e => setSched({ ...sched, dailyTime: e.target.value }) }),
             ) : null,
             status === 'scheduled' ? h('div', { className: 'kbn-field' },
-              h('span', { className: 'kbn-field-label' }, '父卡片（可选：父卡片完成时激活；不设则不激活）'),
+              h('span', { className: 'kbn-field-label' }, t('d.parent')),
               h('select', { className: 'kbn-input kbn-select', value: sched.parentId, onChange: e => setSched({ ...sched, parentId: e.target.value }) },
-                h('option', { value: '' }, '无（不设置父卡片）'),
-                (props.tasks || []).map(t => h('option', { key: t.id, value: t.id }, t.title + '（' + statusOf(t.status).label + '）')),
+                h('option', { value: '' }, t('d.parentNone')),
+                (props.tasks || []).map(x => h('option', { key: x.id, value: x.id }, x.title + '（' + statusOf(x.status).label + '）')),
               ),
             ) : null,
             h('div', { className: 'kbn-modal-actions' },
-              h('button', { className: 'kbn-btn', onClick: () => props.onClose() }, '取消'),
-              h('button', { className: 'kbn-btn kbn-btn-run', disabled: busy, onClick: submit }, '创建'),
+              h('button', { className: 'kbn-btn', onClick: () => props.onClose() }, t('ui.cancel')),
+              h('button', { className: 'kbn-btn kbn-btn-run', disabled: busy, onClick: submit }, t('dlg.create')),
             ),
           ),
         )
@@ -677,7 +801,7 @@ window.__ModuleLoader__.load({
         const [busy, setBusy] = React.useState(false)
         const [err, setErr] = React.useState(null)
         function submit() {
-          if (!name.trim()) { setErr('请填写看板名称'); return }
+          if (!name.trim()) { setErr(t('dlg.boardNameRequired')); return }
           setBusy(true)
           setErr(null)
           call('createBoard', { name: name.trim() })
@@ -686,12 +810,12 @@ window.__ModuleLoader__.load({
         }
         return h('div', { className: 'kbn-modal-mask', onClick: e => { if (e.target === e.currentTarget) props.onClose() } },
           h('div', { className: 'kbn-modal' },
-            h('div', { className: 'kbn-modal-title' }, '新建看板'),
+            h('div', { className: 'kbn-modal-title' }, t('dlg.newBoard')),
             err ? h('div', { className: 'kbn-error' }, err) : null,
-            h('input', { className: 'kbn-input', autoFocus: true, placeholder: '看板名称', value: name, onChange: e => setName(e.target.value), onKeyDown: e => { if (e.key === 'Enter') submit() } }),
+            h('input', { className: 'kbn-input', autoFocus: true, placeholder: t('dlg.boardNamePh'), value: name, onChange: e => setName(e.target.value), onKeyDown: e => { if (e.key === 'Enter') submit() } }),
             h('div', { className: 'kbn-modal-actions' },
-              h('button', { className: 'kbn-btn', onClick: () => props.onClose() }, '取消'),
-              h('button', { className: 'kbn-btn kbn-btn-run', disabled: busy, onClick: submit }, '创建'),
+              h('button', { className: 'kbn-btn', onClick: () => props.onClose() }, t('ui.cancel')),
+              h('button', { className: 'kbn-btn kbn-btn-run', disabled: busy, onClick: submit }, t('dlg.create')),
             ),
           ),
         )
@@ -785,7 +909,7 @@ window.__ModuleLoader__.load({
           call('bulkMove', { slug, ids: selIds, status }).then(data => {
             const results = (data && data.results) || []
             const failed = results.filter(r => !r.ok)
-            if (failed.length > 0) setError('部分任务移动失败：' + failed.map(r => r.error).join('；'))
+            if (failed.length > 0) setError(t('board.partialMoveFail', { a: failed.map(r => r.error).join('；') }))
             else setSel({})
             refresh(false)
           }).catch(e => setError(String((e && e.message) || e)))
@@ -801,15 +925,15 @@ window.__ModuleLoader__.load({
         if (!store) {
           if (error) {
             return h('div', { className: 'kbn-empty' },
-              h('div', { className: 'kbn-error' }, '看板数据加载失败：' + error + '（若持续出现，请重启 DSH 服务后刷新页面）'),
-              h('button', { className: 'kbn-btn', style: { marginTop: 10 }, onClick: () => { setError(null); refresh(false) } }, '重试'),
+              h('div', { className: 'kbn-error' }, t('board.loadFail', { a: error })),
+              h('button', { className: 'kbn-btn', style: { marginTop: 10 }, onClick: () => { setError(null); refresh(false) } }, t('board.retry')),
             )
           }
-          return h('div', { className: 'kbn-empty' }, '加载中…')
+          return h('div', { className: 'kbn-empty' }, t('board.loading'))
         }
 
         return h('div', { className: 'kbn-body' },
-          error ? h('div', { className: 'kbn-error' }, error + '（请检查插件与存储）') : null,
+          error ? h('div', { className: 'kbn-error' }, t('board.errorSuffix', { a: error })) : null,
           h('div', { className: 'kbn-toolbar' },
             store.boards.length > 0 ? h('select', {
               className: 'kbn-input kbn-select',
@@ -818,13 +942,13 @@ window.__ModuleLoader__.load({
             },
               store.boards.map(b => h('option', { key: b.slug, value: b.slug }, b.name + '（' + b.tasks.length + '）')),
             ) : null,
-            h('button', { className: 'kbn-btn', onClick: () => setCreating(!creating) }, '新建看板'),
-            confirmBoardDel ? h('button', { className: 'kbn-btn kbn-btn-danger', disabled: !board, onClick: doDeleteBoard }, '确认删除当前看板') : null,
-            board && !confirmBoardDel ? h('button', { className: 'kbn-btn kbn-btn-danger', onClick: () => setConfirmBoardDel(true) }, '删板') : null,
-            confirmBoardDel ? h('button', { className: 'kbn-btn', onClick: () => setConfirmBoardDel(false) }, '取消') : null,
-            h('button', { className: 'kbn-btn' + (showArchived ? ' on' : ''), onClick: () => setShowArchived(!showArchived) }, '显示已归档列'),
-            h('button', { className: 'kbn-btn kbn-btn-run', disabled: !board, onClick: () => setDialog({ lane: 'triage' }) }, '＋ 新任务'),
-            h('button', { className: 'kbn-btn', title: '强制重读磁盘数据', onClick: () => refresh(true) }, '刷新'),
+            h('button', { className: 'kbn-btn', onClick: () => setCreating(!creating) }, t('board.newBoardBtn')),
+            confirmBoardDel ? h('button', { className: 'kbn-btn kbn-btn-danger', disabled: !board, onClick: doDeleteBoard }, t('board.confirmDelBoard')) : null,
+            board && !confirmBoardDel ? h('button', { className: 'kbn-btn kbn-btn-danger', onClick: () => setConfirmBoardDel(true) }, t('board.delBoard')) : null,
+            confirmBoardDel ? h('button', { className: 'kbn-btn', onClick: () => setConfirmBoardDel(false) }, t('ui.cancel')) : null,
+            h('button', { className: 'kbn-btn' + (showArchived ? ' on' : ''), onClick: () => setShowArchived(!showArchived) }, t('board.showArchived')),
+            h('button', { className: 'kbn-btn kbn-btn-run', disabled: !board, onClick: () => setDialog({ lane: 'triage' }) }, t('board.newTaskBtn')),
+            h('button', { className: 'kbn-btn', title: t('board.refreshTitle'), onClick: () => refresh(true) }, t('board.refreshBtn')),
           ),
           creating ? h(CreateBoardForm, { onCreated: newSlug => { setSlug(newSlug); refresh(false) }, onClose: () => setCreating(false) }) : null,
           selIds.length > 1 ? h(BulkBar, {
@@ -833,7 +957,7 @@ window.__ModuleLoader__.load({
             onDelete: doBulkDelete,
             onClear: () => setSel({}),
           }) : null,
-          store.boards.length === 0 ? h('div', { className: 'kbn-empty' }, '还没有看板。点击「新建看板」创建第一个看板。') : null,
+          store.boards.length === 0 ? h('div', { className: 'kbn-empty' }, t('board.empty')) : null,
           h('div', { className: 'kbn-cols', onClick: () => { if (selIds.length > 0) setSel({}) } },
             lanes.map(lane => {
               const laneTasks = tasks.filter(t => t.status === lane.id)
@@ -898,17 +1022,17 @@ window.__ModuleLoader__.load({
               const nextSeen = seenRef.current || {}
               const newToasts = []
               for (const b of boards) {
-                for (const t of b.tasks || []) {
-                  const run = t.run
-                  const prev = nextSeen[t.id]
+                for (const task of b.tasks || []) {
+                  const run = task.run
+                  const prev = nextSeen[task.id]
                   if (run && run.outcome && (!prev || prev.outcome !== run.outcome)) {
                     if (run.outcome === 'done') {
-                      newToasts.push({ key: 't' + (++seq), tone: 'ok', title: '看板任务「' + cap(t.title, 30) + '」已完成', detail: '' })
+                      newToasts.push({ key: 't' + (++seq), tone: 'ok', title: t('toast.done', { a: cap(task.title, 30) }), detail: '' })
                     } else if (run.outcome === 'error') {
-                      newToasts.push({ key: 't' + (++seq), tone: 'bad', title: '看板任务「' + cap(t.title, 30) + '」已阻塞', detail: run.error ? String(run.error) : '' })
+                      newToasts.push({ key: 't' + (++seq), tone: 'bad', title: t('toast.blocked', { a: cap(task.title, 30) }), detail: run.error ? String(run.error) : '' })
                     }
                   }
-                  nextSeen[t.id] = { outcome: run && run.outcome ? run.outcome : null }
+                  nextSeen[task.id] = { outcome: run && run.outcome ? run.outcome : null }
                 }
               }
               if (seenRef.current === null) {
@@ -944,13 +1068,16 @@ window.__ModuleLoader__.load({
       }
 
       const disposers = []
+      if (locale && typeof locale.register === 'function') {
+        disposers.push(locale.register('kanban', LOCALE_DICT))
+      }
       disposers.push(insertCss(CSS))
       slots.inject('conversation.view', () => slots.register(
-        { name: 'conversation.view', id: 'kanban', order: 20, label: () => '看板' },
+        { name: 'conversation.view', id: 'kanban', order: 20, locale: locale ? 'kanban' : undefined, label: () => t('tab') },
         () => h(KanbanView),
       ))
       slots.inject('shell.overlay', () => slots.register(
-        { name: 'shell.overlay', id: 'kanban-status', order: 0 },
+        { name: 'shell.overlay', id: 'kanban-status', order: 0, locale: locale ? 'kanban' : undefined },
         () => h(KanbanOverlay),
       ))
       ctx.effect(() => () => {
